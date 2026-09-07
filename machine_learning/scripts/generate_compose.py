@@ -47,6 +47,14 @@ def app_name(client_id: str) -> str:
     return f"superexec-clientapp-{safe_id(client_id)}"
 
 
+def compose_host_path(path: Path) -> str:
+    """Render a host path for Compose, preserving relative-path semantics."""
+    value = str(path)
+    if not path.is_absolute() and not value.startswith("./") and not value.startswith("../"):
+        return f"./{value}"
+    return value
+
+
 def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = DeploymentProfile.DEVELOPMENT) -> dict:
     validate_clients(clients)
     profile_value = profile.value if isinstance(profile, DeploymentProfile) else profile
@@ -84,11 +92,12 @@ def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = Dep
     }
     if config.is_production:
         assert config.superlink_state_host_dir is not None
+        state_host_dir = compose_host_path(config.superlink_state_host_dir)
         superlink_service["volumes"] = [
             f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
             f"{host_tls_dir}/superlink.crt:{TLS_CONTAINER_DIR}/superlink.crt:ro",
             f"{host_tls_dir}/superlink.key:{TLS_CONTAINER_DIR}/superlink.key:ro",
-            f"{config.superlink_state_host_dir}:{config.superlink_state_dir}:rw",
+            f"{state_host_dir}:{config.superlink_state_dir}:rw",
         ]
 
     services = {"superlink": superlink_service}
