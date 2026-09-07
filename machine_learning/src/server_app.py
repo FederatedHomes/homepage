@@ -18,6 +18,11 @@ MODEL_BASE_NAME = os.environ.get("MODEL_BASE_NAME", "final_model.pt")
 GLOBAL_MODEL_PREFIX = os.environ.get("GLOBAL_MODEL_PREFIX", "global")
 METRICS_BASE_NAME = os.environ.get("METRICS_BASE_NAME", "final_metrics.json")
 
+# Minimum number of successful client responses required to aggregate a round.
+# With three registered clients this permits one client failure while preventing
+# training from continuing on a single client's update.
+MIN_SUCCESSFUL_CLIENTS = 2
+
 # Create ServerApp
 app = ServerApp()
 
@@ -39,7 +44,7 @@ def main(grid: Grid, context: Context) -> None:
 
     # Initialize FedAvg strategy
     class ContractFedAvg(FedAvg):
-        """FedAvg that broadcasts the data contract and rejects schema violations."""
+        """FedAvg that broadcasts the data contract and handles failed replies."""
 
         def configure_train(
             self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
@@ -51,19 +56,44 @@ def main(grid: Grid, context: Context) -> None:
         def aggregate_train(
             self, server_round: int, replies: list[Message]
         ) -> tuple[ArrayRecord | None, MetricRecord | None]:
-            # Filter out clients that reported schema violations
-            valid_replies = []
+            """Aggregate only successful, schema-compatible client responses.
+
+            Flower can return a Message without content when a sampled client is
+            unavailable or fails during a round. Treat that as a failed client
+            instead of dereferencing ``msg.content`` and crashing the ServerApp.
+            """
+            valid_replies: list[Message] = []
+            failed_replies = 0
+
             for msg in replies:
+                if not msg.has_content():
+                    failed_replies += 1
+                    log(logger, "WARNING", "Client reply missing content; excluding it from aggregation")
+                    continue
+
                 metrics: MetricRecord = msg.content["metrics"]
                 if metrics.get("schema_violation", None):
                     log(logger, "WARNING", "Client rejected (schema): %s", metrics["schema_violation"])
                     continue
                 valid_replies.append(msg)
 
-            if not valid_replies:
-                return None, None
+            if failed_replies:
+                log(
+                    logger,
+                    "WARNING",
+                    "Excluded %d failed client response(s) from round %d",
+                    failed_replies,
+                    server_round,
+                )
+
+            if len(valid_replies) < MIN_SUCCESSFUL_CLIENTS:
+                raise RuntimeError(
+                    f"Round {server_round} aborted: received {len(valid_replies)} successful "
+                    f"client response(s), minimum required is {MIN_SUCCESSFUL_CLIENTS}."
+                )
+
             return super().aggregate_train(server_round, valid_replies)
-        
+
     strategy = ContractFedAvg(fraction_evaluate=fraction_evaluate)
 
     # Start strategy, run FedAvg for `num_rounds`
@@ -112,7 +142,7 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     model.to(device)
 
     # Evaluate the global model on the test set
-    test_loss, test_acc, total_examples  = test_model(model, test_dataloader, device)
+    test_loss, test_acc, total_examples = test_model(model, test_dataloader, device)
 
     # Return the evaluation metrics
     return MetricRecord({"accuracy": test_acc, "loss": test_loss, "num-examples": total_examples})

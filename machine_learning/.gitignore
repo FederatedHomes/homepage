@@ -6,6 +6,7 @@
 *.pfx
 certificates/
 tmp/
+state/
 
 # Runtime state and local credentials
 *.db

@@ -7,6 +7,10 @@ cd "$ROOT_DIR"
 create_directories() {
   mkdir -p data/global checkpoints/global
 
+  if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
+    mkdir -p "$SUPERLINK_STATE_HOST_DIR"
+  fi
+
   if [ ! -f clients.yml ]; then
     echo "Warning: clients.yml not found."
     echo "Create clients.yml before running the federated learning stack."
@@ -96,12 +100,13 @@ validate_auth_environment() {
   if [ "$profile" != "production" ]; then
     return
   fi
-  echo "Validating production TLS and SuperNode authentication material..."
+  echo "Validating production TLS, SuperNode authentication, and SuperLink state material..."
   python3 - <<'PY'
 from src.deployment_config import validate_environment
 config = validate_environment(require_files=True)
 print(f"Validated production SuperLink: {config.superlink_address}")
 print(f"Validated SuperNode auth directory: {config.supernode_auth_host_dir}")
+print(f"Validated SuperLink state directory: {config.superlink_state_host_dir}")
 PY
 
   python3 - <<'PY'
@@ -172,8 +177,8 @@ setup() {
   echo "=========================================="
   echo "Federated Learning Environment Setup"
   echo "=========================================="
-  create_directories
   create_env_file
+  create_directories
   prepare_development_auth
   validate_auth_environment
   generate_compose_file

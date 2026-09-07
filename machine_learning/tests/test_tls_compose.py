@@ -19,7 +19,9 @@ def configure_production_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     cert = tmp_path / "superlink.crt"
     key = tmp_path / "superlink.key"
     auth_host_dir = tmp_path / "auth-host"
+    state_host_dir = tmp_path / "state" / "superlink"
     auth_host_dir.mkdir()
+    state_host_dir.mkdir(parents=True)
 
     for path in (ca, cert, key):
         path.write_text("test", encoding="utf-8")
@@ -36,6 +38,9 @@ def configure_production_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     # separately through SUPERNODE_AUTH_HOST_DIR below.
     monkeypatch.setenv("SUPERNODE_AUTH_PRIVATE_KEY_DIR", "/etc/flower/auth")
     monkeypatch.setenv("SUPERNODE_AUTH_HOST_DIR", str(auth_host_dir))
+    # Persistent SuperLink registration state is required for production.
+    monkeypatch.setenv("SUPERLINK_STATE_HOST_DIR", str(state_host_dir))
+    monkeypatch.setenv("SUPERLINK_STATE_DIR", "/var/lib/flower")
 
 
 def test_development_compose_keeps_insecure_transport() -> None:
@@ -56,6 +61,8 @@ def test_production_compose_requires_explicit_tls_environment(monkeypatch: pytes
         "TLS_CERTIFICATE_HOST_DIR",
         "SUPERNODE_AUTH_PRIVATE_KEY_DIR",
         "SUPERNODE_AUTH_HOST_DIR",
+        "SUPERLINK_STATE_HOST_DIR",
+        "SUPERLINK_STATE_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -78,6 +85,8 @@ def test_production_compose_uses_tls_and_authentication(monkeypatch: pytest.Monk
     assert "--ssl-certfile" in superlink_command
     assert "--ssl-keyfile" in superlink_command
     assert "--enable-supernode-auth" in superlink_command
+    assert "--database" in superlink_command
+    assert superlink_command[superlink_command.index("--database") + 1] == "/var/lib/flower/superlink.db"
     assert "--insecure" not in node_command
     assert "--root-certificates" in node_command
     assert "--auth-supernode-private-key" in node_command
@@ -86,6 +95,7 @@ def test_production_compose_uses_tls_and_authentication(monkeypatch: pytest.Monk
         f"{tmp_path}/ca.crt:/etc/flower/tls/ca.crt:ro",
         f"{tmp_path}/superlink.crt:/etc/flower/tls/superlink.crt:ro",
         f"{tmp_path}/superlink.key:/etc/flower/tls/superlink.key:ro",
+        f"{tmp_path}/state/superlink:/var/lib/flower:rw",
     ]
     assert compose["services"]["supernode-client1"]["volumes"] == [
         f"{tmp_path}/ca.crt:/etc/flower/tls/ca.crt:ro",

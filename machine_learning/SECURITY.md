@@ -7,7 +7,7 @@ This project uses explicit deployment profiles so development convenience does n
 The federated learning application has two explicit deployment profiles:
 
 - `development` — the local Docker/Compose workflow. This profile may use Flower's `--insecure` transport for local integration testing.
-- `production` — the secure deployment profile. Production requires an explicit SuperLink address, TLS certificate/key paths, and SuperNode authentication credentials. Production Fleet commands reject `--insecure`.
+- `production` — the secure deployment profile. Production requires an explicit SuperLink address, TLS certificate/key paths, SuperNode authentication credentials, and a persistent SuperLink state directory. Production Fleet commands reject `--insecure`.
 
 The default profile is `development` so existing local workflows remain unchanged.
 
@@ -45,7 +45,7 @@ For controlled development testing, `scripts/generate_dev_certs.py` can create a
 
 `machine_learning/scripts/generate_compose.py` is the source for the generated Compose deployment. It creates one SuperLink, one SuperNode per configured client, the corresponding SuperExec services, a trainer, and a Docker bridge network.
 
-Production Compose generation mounts TLS material read-only and enables SuperNode authentication on the Fleet connection. Each production SuperNode receives only its own authentication private key.
+Production Compose generation mounts TLS material read-only and enables SuperNode authentication on the Fleet connection. Each production SuperNode receives only its own authentication private key. The SuperLink also receives a persistent state directory and starts Flower with a database path inside that directory so registered SuperNode identities survive container recreation.
 
 The production generator also validates that the generated SuperLink and SuperNode Fleet commands do not contain `--insecure`.
 
@@ -65,10 +65,14 @@ The production validator requires:
 - `TLS_CERTIFICATE_HOST_DIR`
 - `SUPERNODE_AUTH_PRIVATE_KEY_DIR`
 - `SUPERNODE_AUTH_HOST_DIR`
+- `SUPERLINK_STATE_HOST_DIR`
+- `SUPERLINK_STATE_DIR`
+
+`SUPERLINK_STATE_HOST_DIR` must point to a persistent host directory that survives SuperLink container recreation. `SUPERLINK_STATE_DIR` is the writable directory inside the SuperLink container; the generator uses `<SUPERLINK_STATE_DIR>/superlink.db` as Flower's database path.
 
 ## Secrets handling
 
-Private keys and other runtime credentials belong outside Git. The repository ignores `.env`, certificate/key files, the local `certificates/` tree, and Flower runtime state under `machine_learning/.flwr/`.
+Private keys and other runtime credentials belong outside Git. The repository ignores `.env`, certificate/key files, the local `certificates/` tree, persistent `state/`, and Flower runtime state under `machine_learning/.flwr/`.
 
 Each production service should receive only the credentials it needs.
 
@@ -112,6 +116,28 @@ SUPERNODE_AUTH_HOST_DIR=<host authentication directory>
 ```
 
 `setup.sh` validates that the configured authentication directory exists and that every client in `clients.yml` has its own authentication private key before production Compose generation.
+
+### Persistent SuperLink authentication state
+
+SuperNode registration is SuperLink state. In production, that state must survive SuperLink container recreation. The generated production command includes:
+
+```text
+--database /var/lib/flower/superlink.db
+```
+
+and mounts the configured host state directory to `/var/lib/flower`.
+
+The setup workflow creates the configured `SUPERLINK_STATE_HOST_DIR` before generating Compose. The directory and resulting database are runtime state and are ignored by Git.
+
+The required persistence validation is:
+
+1. Register the authorized SuperNode public keys.
+2. Start the production SuperLink and all authorized SuperNodes.
+3. Confirm all authorized SuperNodes authenticate.
+4. Recreate/restart the SuperLink container without deleting the state directory.
+5. Confirm all authorized SuperNodes authenticate again without re-registration.
+
+Do not use `docker compose down -v` for this validation because persistent state must not be removed.
 
 ### Register authorized SuperNodes
 
@@ -180,9 +206,9 @@ federated   no access
 training
 ```
 
-TLS protects the Fleet transport and verifies the SuperLink using the configured CA. SuperNode authentication separately determines whether the connecting SuperNode identity is authorized.
+TLS protects the Fleet transport and verifies the SuperLink using the configured CA. SuperNode authentication separately determines whether the connecting SuperNode identity is authorized. Persistent SuperLink state preserves the authorization registry across container recreation.
 
-An authorized SuperNode must connect successfully, while an unregistered SuperNode using a different key must be rejected. This is the remaining end-to-end validation for Step 6.3.
+An authorized SuperNode must connect successfully, while an unregistered SuperNode using a different key must be rejected. An authorized SuperNode must also reconnect successfully after the SuperLink container is recreated without deleting the persistent state directory.
 
 ### Key rotation and revocation
 
@@ -199,4 +225,4 @@ Do not replace a registered key without considering the impact on the existing N
 
 ## Scope boundary
 
-Step 6.2 establishes TLS for the SuperLink ↔ SuperNode Fleet transport and the Flower CLI connection used by the deployment runtime. Step 6.3 adds SuperNode authentication to that TLS-protected Fleet connection. Internal Runtime/AppIO TLS (`--appio-ssl-*`) requires separate per-service certificate/SAN handling and is intentionally kept as a distinct future hardening item rather than sharing the SuperLink private key across services.
+Step 6.2 establishes TLS for the SuperLink ↔ SuperNode Fleet transport and the Flower CLI connection used by the deployment runtime. Step 6.3 adds SuperNode authentication to that TLS-protected Fleet connection and persists the SuperLink authorization state. Internal Runtime/AppIO TLS (`--appio-ssl-*`) requires separate per-service certificate/SAN handling and is intentionally kept as a distinct future hardening item rather than sharing the SuperLink private key across services.
