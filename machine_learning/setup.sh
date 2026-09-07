@@ -177,8 +177,8 @@ setup() {
   echo "=========================================="
   echo "Federated Learning Environment Setup"
   echo "=========================================="
-  create_directories
   create_env_file
+  create_directories
   prepare_development_auth
   validate_auth_environment
   generate_compose_file
