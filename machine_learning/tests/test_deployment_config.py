@@ -13,8 +13,10 @@ def production_env(tmp_path: Path) -> dict[str, str]:
     key = tmp_path / "superlink.key"
     auth_dir = tmp_path / "auth"
     auth_host_dir = tmp_path / "auth-host"
+    state_host_dir = tmp_path / "state-host"
     auth_dir.mkdir()
     auth_host_dir.mkdir()
+    state_host_dir.mkdir()
     for path in (root, cert, key):
         path.write_text("test", encoding="utf-8")
     return {
@@ -26,6 +28,8 @@ def production_env(tmp_path: Path) -> dict[str, str]:
         "TLS_CERTIFICATE_HOST_DIR": str(tmp_path),
         "SUPERNODE_AUTH_PRIVATE_KEY_DIR": str(auth_dir),
         "SUPERNODE_AUTH_HOST_DIR": str(auth_host_dir),
+        "SUPERLINK_STATE_HOST_DIR": str(state_host_dir),
+        "SUPERLINK_STATE_DIR": "/var/lib/flower",
     }
 
 
@@ -51,7 +55,7 @@ def test_production_requires_explicit_environment_variables() -> None:
         load_deployment_config({"DEPLOYMENT_PROFILE": "production"})
 
 
-def test_production_requires_tls_and_auth_directories_when_requested(tmp_path: Path) -> None:
+def test_production_requires_tls_auth_and_state_directories_when_requested(tmp_path: Path) -> None:
     env = production_env(tmp_path)
     (tmp_path / "superlink.key").unlink()
     with pytest.raises(DeploymentConfigError, match="security files/directories"):
@@ -68,6 +72,8 @@ def test_production_configuration_loads(tmp_path: Path) -> None:
     assert config.tls_certificate_host_dir == tmp_path
     assert config.supernode_auth_private_key_dir == tmp_path / "auth"
     assert config.supernode_auth_host_dir == tmp_path / "auth-host"
+    assert config.superlink_state_host_dir == tmp_path / "state-host"
+    assert config.superlink_state_dir == Path("/var/lib/flower")
     assert config.is_production
     assert config.supernode_auth_enabled
 
@@ -100,6 +106,11 @@ def test_production_generates_superlink_auth_args(tmp_path: Path) -> None:
     assert load_deployment_config(production_env(tmp_path)).superlink_auth_args() == ["--enable-supernode-auth"]
 
 
+def test_production_generates_persistent_superlink_state_args(tmp_path: Path) -> None:
+    config = load_deployment_config(production_env(tmp_path))
+    assert config.superlink_state_args() == ["--database", "/var/lib/flower/superlink.db"]
+
+
 def test_production_generates_per_client_supernode_auth_args(tmp_path: Path) -> None:
     config = load_deployment_config(production_env(tmp_path))
     assert config.supernode_auth_args("client-1") == ["--auth-supernode-private-key", str(tmp_path / "auth" / "client-1")]
@@ -129,6 +140,7 @@ def test_development_generates_no_tls_or_auth_args() -> None:
     config = load_deployment_config({})
     assert config.superlink_tls_args() == []
     assert config.superlink_auth_args() == []
+    assert config.superlink_state_args() == []
     assert config.supernode_tls_args() == []
     assert config.supernode_auth_args("client-1") == []
     assert config.cli_tls_config() == {"address": "superlink:9092", "insecure": True}
