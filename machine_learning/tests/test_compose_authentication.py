@@ -2,16 +2,15 @@
 
 from pathlib import Path
 
-from scripts.generate_compose import build_compose
+from scripts.generate_compose import build_compose, render_compose
 
 
 def production_env(tmp_path: Path, monkeypatch) -> None:
     tls_dir = tmp_path / "tls"
     auth_dir = tmp_path / "auth"
-    state_dir = tmp_path / "state"
+    state_dir = Path("state/superlink")
     tls_dir.mkdir()
     auth_dir.mkdir()
-    state_dir.mkdir()
     for name in ("ca.crt", "superlink.crt", "superlink.key"):
         (tls_dir / name).write_text("test", encoding="utf-8")
     for client_id in ("client-1", "client-2"):
@@ -49,7 +48,15 @@ def test_production_superlink_mounts_persistent_state(monkeypatch, tmp_path: Pat
     production_env(tmp_path, monkeypatch)
     compose = build_compose(clients(), profile="production")
     volumes = compose["services"]["superlink"]["volumes"]
-    assert f"{tmp_path / 'state'}:/var/lib/flower:rw" in volumes
+    assert "./state/superlink:/var/lib/flower:rw" in volumes
+
+
+def test_render_compose_preserves_relative_state_mount(monkeypatch, tmp_path: Path) -> None:
+    production_env(tmp_path, monkeypatch)
+    compose = build_compose(clients(), profile="production")
+    rendered = render_compose(compose)
+    assert "- ./state/superlink:/var/lib/flower:rw" in rendered
+    assert "- state/superlink:/var/lib/flower:rw" not in rendered
 
 
 def test_each_supernode_gets_only_its_own_auth_key_and_ca(monkeypatch, tmp_path: Path) -> None:
