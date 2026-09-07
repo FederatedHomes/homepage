@@ -63,6 +63,7 @@ def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = Dep
     if config.is_production:
         superlink_command.extend(config.superlink_tls_args())
         superlink_command.extend(config.superlink_auth_args())
+        superlink_command.extend(config.superlink_state_args())
         supernode_prefix.extend(config.supernode_tls_args())
     else:
         superlink_command.append("--insecure")
@@ -82,10 +83,12 @@ def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = Dep
         "networks": ["flwr-network"],
     }
     if config.is_production:
+        assert config.superlink_state_host_dir is not None
         superlink_service["volumes"] = [
             f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
             f"{host_tls_dir}/superlink.crt:{TLS_CONTAINER_DIR}/superlink.crt:ro",
             f"{host_tls_dir}/superlink.key:{TLS_CONTAINER_DIR}/superlink.key:ro",
+            f"{config.superlink_state_host_dir}:{config.superlink_state_dir}:rw",
         ]
 
     services = {"superlink": superlink_service}
