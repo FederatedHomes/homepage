@@ -1,4 +1,4 @@
-"""Tests for per-SuperNode authentication configuration in Compose."""
+"""Tests for production SuperNode authentication and persistent SuperLink state."""
 
 from pathlib import Path
 
@@ -8,8 +8,10 @@ from scripts.generate_compose import build_compose
 def production_env(tmp_path: Path, monkeypatch) -> None:
     tls_dir = tmp_path / "tls"
     auth_dir = tmp_path / "auth"
+    state_dir = tmp_path / "state"
     tls_dir.mkdir()
     auth_dir.mkdir()
+    state_dir.mkdir()
     for name in ("ca.crt", "superlink.crt", "superlink.key"):
         (tls_dir / name).write_text("test", encoding="utf-8")
     for client_id in ("client-1", "client-2"):
@@ -22,6 +24,8 @@ def production_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TLS_CERTIFICATE_HOST_DIR", str(tls_dir))
     monkeypatch.setenv("SUPERNODE_AUTH_PRIVATE_KEY_DIR", "/etc/flower/auth")
     monkeypatch.setenv("SUPERNODE_AUTH_HOST_DIR", str(auth_dir))
+    monkeypatch.setenv("SUPERLINK_STATE_HOST_DIR", str(state_dir))
+    monkeypatch.setenv("SUPERLINK_STATE_DIR", "/var/lib/flower")
 
 
 def clients() -> list[dict]:
@@ -36,7 +40,16 @@ def test_production_superlink_enables_supernode_authentication(monkeypatch, tmp_
     compose = build_compose(clients(), profile="production")
     command = compose["services"]["superlink"]["command"]
     assert "--enable-supernode-auth" in command
+    assert "--database" in command
+    assert command[command.index("--database") + 1] == "/var/lib/flower/superlink.db"
     assert "--insecure" not in command
+
+
+def test_production_superlink_mounts_persistent_state(monkeypatch, tmp_path: Path) -> None:
+    production_env(tmp_path, monkeypatch)
+    compose = build_compose(clients(), profile="production")
+    volumes = compose["services"]["superlink"]["volumes"]
+    assert f"{tmp_path / 'state'}:/var/lib/flower:rw" in volumes
 
 
 def test_each_supernode_gets_only_its_own_auth_key_and_ca(monkeypatch, tmp_path: Path) -> None:
