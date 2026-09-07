@@ -33,6 +33,8 @@ class DeploymentConfig:
     tls_certificate_host_dir: Path | None = None
     supernode_auth_private_key_dir: Path | None = None
     supernode_auth_host_dir: Path | None = None
+    superlink_state_host_dir: Path | None = None
+    superlink_state_dir: Path | None = None
 
     @property
     def is_production(self) -> bool:
@@ -58,6 +60,12 @@ class DeploymentConfig:
         if not self.supernode_auth_enabled:
             return []
         return ["--enable-supernode-auth"]
+
+    def superlink_state_args(self) -> list[str]:
+        if not self.is_production:
+            return []
+        assert self.superlink_state_dir is not None
+        return ["--database", str(self.superlink_state_dir / "superlink.db")]
 
     def supernode_tls_args(self) -> list[str]:
         if not self.is_production:
@@ -103,6 +111,8 @@ SUPERLINK_PRIVATE_KEY_ENV = "SUPERLINK_PRIVATE_KEY"
 TLS_CERTIFICATE_HOST_DIR_ENV = "TLS_CERTIFICATE_HOST_DIR"
 SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV = "SUPERNODE_AUTH_PRIVATE_KEY_DIR"
 SUPERNODE_AUTH_HOST_DIR_ENV = "SUPERNODE_AUTH_HOST_DIR"
+SUPERLINK_STATE_HOST_DIR_ENV = "SUPERLINK_STATE_HOST_DIR"
+SUPERLINK_STATE_DIR_ENV = "SUPERLINK_STATE_DIR"
 
 PRODUCTION_REQUIRED_ENV = (
     SUPERLINK_ADDRESS_ENV,
@@ -112,6 +122,8 @@ PRODUCTION_REQUIRED_ENV = (
     TLS_CERTIFICATE_HOST_DIR_ENV,
     SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV,
     SUPERNODE_AUTH_HOST_DIR_ENV,
+    SUPERLINK_STATE_HOST_DIR_ENV,
+    SUPERLINK_STATE_DIR_ENV,
 )
 
 _SAFE_CLIENT_ID = re.compile(r"[A-Za-z0-9._-]+")
@@ -152,6 +164,8 @@ def load_deployment_config(environ: Mapping[str, str] | None = None, *, require_
         "tls_certificate_host_dir": Path(env[TLS_CERTIFICATE_HOST_DIR_ENV]),
         "supernode_auth_private_key_dir": Path(env[SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV]),
         "supernode_auth_host_dir": Path(env[SUPERNODE_AUTH_HOST_DIR_ENV]),
+        "superlink_state_host_dir": Path(env[SUPERLINK_STATE_HOST_DIR_ENV]),
+        "superlink_state_dir": Path(env[SUPERLINK_STATE_DIR_ENV]),
     }
     if require_files:
         missing_files = []
@@ -162,6 +176,9 @@ def load_deployment_config(environ: Mapping[str, str] | None = None, *, require_
         auth_host_dir = paths["supernode_auth_host_dir"]
         if not auth_host_dir.is_dir():
             missing_files.append(f"supernode_auth_host_dir={auth_host_dir}")
+        state_host_dir = paths["superlink_state_host_dir"]
+        if not state_host_dir.is_dir():
+            missing_files.append(f"superlink_state_host_dir={state_host_dir}")
         if missing_files:
             raise DeploymentConfigError("Production security files/directories were not found: " + ", ".join(missing_files))
 
