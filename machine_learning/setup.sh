@@ -37,7 +37,7 @@ select_host_role() {
 
   echo >&2
   echo "What type of host are you preparing?" >&2
-  echo "  1) Server host — runs Flower SuperLink and ServerApp" >&2
+  echo "  1) Server host — runs Flower SuperLink, ServerApp, and trainer" >&2
   echo "  2) Client host — runs one SuperNode and one ClientApp" >&2
   read -rp "Enter choice [1-2]: " role_choice
 
@@ -95,10 +95,14 @@ create_directories() {
   local role="$1"
 
   if [ "$role" = "server" ]; then
+    # Server-only persistent/runtime directories. Client data never belongs here.
+    mkdir -p "${SERVER_DATA_HOST_DIR:-./data/global}" "${SERVER_CHECKPOINT_HOST_DIR:-./checkpoints/global}"
     if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
       mkdir -p "$SUPERLINK_STATE_HOST_DIR"
       echo "Prepared SuperLink state directory: $SUPERLINK_STATE_HOST_DIR"
     fi
+    echo "Prepared server data directory: ${SERVER_DATA_HOST_DIR:-./data/global}"
+    echo "Prepared server checkpoint directory: ${SERVER_CHECKPOINT_HOST_DIR:-./checkpoints/global}"
     return 0
   fi
 
@@ -137,37 +141,20 @@ PY
 }
 
 prepare_development_auth() {
-  if [ "${DEPLOYMENT_PROFILE:-development}" != "development" ]; then
+  local role="$1"
+  if [ "$role" != "client" ] || [ "${DEPLOYMENT_PROFILE:-development}" != "development" ]; then
     return
   fi
   if [ ! -f clients.yml ] || [ ! -f scripts/generate_supernode_auth.py ]; then
     return
   fi
+  local client_id="${2:-}"
   local auth_dir="${DEV_SUPERNODE_AUTH_DIR:-certificates/dev/auth}"
-  mapfile -t client_ids < <(python3 - <<'PY'
-from pathlib import Path
-import yaml
-with Path("clients.yml").open("r", encoding="utf-8") as handle:
-    config = yaml.safe_load(handle) or {}
-for client in config.get("clients", []):
-    print(str(client.get("id", "")).strip())
-PY
-)
-  if ((${#client_ids[@]} == 0)); then
-    return
-  fi
-  local missing=0
-  for client_id in "${client_ids[@]}"; do
-    if [ ! -f "$auth_dir/$client_id" ] || [ ! -f "$auth_dir/$client_id.pub" ]; then
-      missing=1
-      break
-    fi
-  done
-  if [ "$missing" -eq 1 ]; then
-    echo "Generating development-only SuperNode identities in $auth_dir"
-    python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "${client_ids[@]}"
+  if [ ! -f "$auth_dir/$client_id" ] || [ ! -f "$auth_dir/$client_id.pub" ]; then
+    echo "Generating development-only SuperNode identity for $client_id in $auth_dir"
+    python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "$client_id"
   else
-    echo "Development SuperNode identities already exist in $auth_dir"
+    echo "Development SuperNode identity already exists in $auth_dir for $client_id"
   fi
 }
 
@@ -232,13 +219,13 @@ prepare_host() {
   fi
 
   create_directories "$role" "$client_id"
-  prepare_development_auth
+  prepare_development_auth "$role" "$client_id"
   validate_auth_environment "$role" "$client_id"
 
   echo
   if [ "$role" = "server" ]; then
     echo "Server host preparation completed."
-    echo "No client data or checkpoint directories were created."
+    echo "Only server data/checkpoint and SuperLink state locations were prepared."
   else
     echo "Client host preparation completed for $client_id."
   fi
@@ -249,7 +236,6 @@ generate_server_compose() {
   load_environment
   export DEPLOYMENT_ROLE=server
   create_directories server
-  prepare_development_auth
   validate_auth_environment server
 
   local output="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
@@ -260,6 +246,7 @@ generate_server_compose() {
     --profile "${DEPLOYMENT_PROFILE:-development}" \
     --role server
   echo "Generated $output"
+  echo "The custom SuperExec application image is built automatically by Docker Compose when the stack is started."
   echo "Server services: SuperLink, ServerApp, and trainer."
 }
 
@@ -273,7 +260,7 @@ generate_client_compose() {
   export CLIENT_ID="$client_id"
 
   create_directories client "$client_id"
-  prepare_development_auth
+  prepare_development_auth client "$client_id"
   validate_auth_environment client "$client_id"
 
   local output="${CLIENT_COMPOSE_FILE:-docker-compose.client-${client_id}.yml}"
@@ -285,6 +272,7 @@ generate_client_compose() {
     --role client \
     --client-id "$client_id"
   echo "Generated $output"
+  echo "The custom SuperExec application image is built automatically by Docker Compose when the stack is started."
   echo "Client services: SuperNode and ClientApp for $client_id."
 }
 
@@ -330,8 +318,8 @@ start_server_training() {
     generate_server_compose
   fi
 
-  docker build -f Dockerfile.superexec -t flwr_superexec:local .
   echo "Starting federated training on the server host..."
+  echo "Docker Compose will build the custom SuperExec application image if it is not already present."
   if docker compose -f "$compose_file" up trainer; then
     echo "Federated training completed successfully."
     docker compose -f "$compose_file" down
