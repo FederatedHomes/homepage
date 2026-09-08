@@ -4,6 +4,62 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 cd "$ROOT_DIR"
 
+ensure_host_dependencies() {
+  local role="${1:-server}"
+  local missing_commands=()
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    missing_commands+=("python3")
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    missing_commands+=("docker")
+  fi
+  if [ "$role" = server ] && ! command -v openssl >/dev/null 2>&1; then
+    missing_commands+=("openssl")
+  fi
+  if [ "$role" = client ] && ! command -v ssh-keygen >/dev/null 2>&1; then
+    missing_commands+=("ssh-keygen")
+  fi
+
+  if ((${#missing_commands[@]} > 0)); then
+    echo >&2
+    echo "Missing required host tools: ${missing_commands[*]}" >&2
+    echo "Install the missing operating-system packages, then rerun ./setup.sh." >&2
+    return 1
+  fi
+
+  if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    echo >&2
+    echo "Missing required Python library: PyYAML" >&2
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+      echo "pip is not available for Python 3." >&2
+      echo "Install pip using your operating-system package manager, then rerun ./setup.sh." >&2
+      return 1
+    fi
+    read -rp "Install PyYAML for this host now? [Y/n]: " install_choice
+    if [[ "$install_choice" =~ ^[Nn]$ ]]; then
+      echo "ERROR: PyYAML is required by the setup scripts." >&2
+      echo "Install it with: python3 -m pip install PyYAML" >&2
+      return 1
+    fi
+    echo "Installing PyYAML..."
+    if ! python3 -m pip install --user PyYAML; then
+      echo "ERROR: Could not install PyYAML automatically." >&2
+      echo "Try: python3 -m pip install PyYAML" >&2
+      return 1
+    fi
+    python3 -c 'import yaml' >/dev/null 2>&1 || {
+      echo "ERROR: PyYAML installation completed but yaml cannot be imported." >&2
+      return 1
+    }
+    echo "PyYAML is available."
+  else
+    echo "PyYAML: available"
+  fi
+
+  echo "Host prerequisites verified for $role host."
+}
+
 load_environment() {
   if [ ! -f .env ]; then
     if [ -f .env.example ]; then
@@ -216,6 +272,7 @@ prepare_host() {
   load_environment; read_clients
   local role client_id=""
   role="$(select_host_role)"; export DEPLOYMENT_ROLE="$role"
+  ensure_host_dependencies "$role"
   if [ "$role" = client ]; then client_id="$(select_client_id)"; export CLIENT_ID="$client_id"; fi
   create_directories "$role" "$client_id"
   prepare_development_auth
@@ -228,13 +285,13 @@ prepare_host() {
 }
 
 generate_server_compose() {
-  load_environment; read_clients; export DEPLOYMENT_ROLE=server
+  load_environment; read_clients; ensure_host_dependencies server; export DEPLOYMENT_ROLE=server
   python3 scripts/generate_compose.py --config clients.yml --output docker-compose.server.yml --profile "${DEPLOYMENT_PROFILE:-development}" --role server
   echo "Generated docker-compose.server.yml"
 }
 
 generate_client_compose() {
-  load_environment; read_clients; export DEPLOYMENT_ROLE=client
+  load_environment; read_clients; ensure_host_dependencies client; export DEPLOYMENT_ROLE=client
   local client_id="${CLIENT_ID:-}"
   [ -n "$client_id" ] || client_id="$(select_client_id)"
   export CLIENT_ID="$client_id"
@@ -249,7 +306,7 @@ start_server_federation() {
 }
 
 run_tests() {
-  read_clients; load_environment
+  read_clients; load_environment; ensure_host_dependencies server
   export DEPLOYMENT_PROFILE=development DEPLOYMENT_ROLE=all
   prepare_development_auth
   validate_auth_environment all
@@ -271,7 +328,7 @@ show_config() {
 }
 
 run_local_development_compose() {
-  read_clients; load_environment
+  read_clients; load_environment; ensure_host_dependencies server
   export DEPLOYMENT_PROFILE=development DEPLOYMENT_ROLE=all
   prepare_development_auth
   local output="${DEV_COMPOSE_FILE:-docker-compose.generated.yml}"
@@ -286,7 +343,7 @@ main_menu() {
     echo "  1) Prepare host"
     echo "  2) Generate server Compose"
     echo "  3) Generate client Compose"
-    echo "  4) Start server federation"
+    echo "  4) Start server infrastructure"
     echo "  5) Run tests"
     echo "  6) Show configuration"
     echo "  7) Start local all-in-one development federation"
