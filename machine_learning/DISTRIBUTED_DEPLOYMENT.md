@@ -29,6 +29,7 @@ Create `.env` from `.env.production.example` and set:
 DEPLOYMENT_PROFILE=production
 DEPLOYMENT_ROLE=server
 SUPERLINK_ADDRESS=192.168.1.100:9092
+SUPERLINK_CONTROL_ADDRESS=192.168.1.100:9093
 ```
 
 Configure the production TLS and authentication paths as described in `.env.production.example`.
@@ -41,43 +42,11 @@ Prepare the server host with `setup.sh`. For the production profile, the setup c
 
 These are valid starter credentials for distributed integration testing and are not the final federation PKI credentials.
 
-**Before registering/preparing the client hosts, the server administrator must share the server's `ca.crt` with every client.** All clients must use this same CA certificate to trust the SuperLink certificate. Clients must not generate their own CA certificate.
-
-The server needs:
-
-- CA certificate
-- SuperLink certificate
-- SuperLink private key
-- persistent SuperLink state directory
-- the public/registration material required by the configured SuperNodes
+**Before preparing client hosts, the server administrator must share the server's `ca.crt` with every client.** All clients must use this same CA certificate to trust the SuperLink certificate. Clients must not generate their own CA certificate.
 
 Generate the SuperLink certificate with a SAN matching the server DNS name or LAN IP used by clients. For development certificates, `scripts/generate_dev_certs.py --superlink-host <server-ip-or-dns>` can be used; do not use development certificates for a production deployment.
 
-Generate the production SuperNode authentication identities for the configured clients and place the corresponding authorized material on the server according to the existing Step 6 authentication workflow. On the distributed client hosts, `setup.sh` creates the client-specific SuperNode key pair; the public key is used for the registration/authentication workflow while the private key remains on that client host.
-
-Generate the server Compose file:
-
-```bash
-python3 scripts/generate_compose.py \
-  --config clients.yml \
-  --output docker-compose.generated.yml \
-  --profile production \
-  --role server
-```
-
-The server Compose contains only `superlink`, `superexec-serverapp`, and `trainer`.
-
-Start the server federation services. The custom SuperExec image is built automatically by Compose:
-
-```bash
-docker compose -f docker-compose.generated.yml up --build -d superlink superexec-serverapp
-```
-
-Start the trainer when the client hosts are ready:
-
-```bash
-docker compose -f docker-compose.generated.yml up --build trainer
-```
+Start the server federation services before registering clients. The production server Compose exposes the SuperLink Fleet API on `9092` and Control API on `9093`.
 
 ## 2. Client host
 
@@ -90,14 +59,31 @@ DEPLOYMENT_PROFILE=production
 DEPLOYMENT_ROLE=client
 CLIENT_ID=client-1
 SUPERLINK_ADDRESS=192.168.1.100:9092
+SUPERLINK_CONTROL_ADDRESS=192.168.1.100:9093
 ```
 
-Before client registration/preparation, copy the **server's `ca.crt`** into the client's configured `TLS_CERTIFICATE_HOST_DIR`. Do not generate a new CA on the client. The client uses the server-provided CA to validate the SuperLink TLS certificate.
+Before client preparation, copy the **server's `ca.crt`** into the client's configured `TLS_CERTIFICATE_HOST_DIR`. Do not generate a new CA on the client. The client uses the server-provided CA to validate the SuperLink TLS certificate.
 
-Then run the setup script on the client host. For the production client role, setup creates exactly one starter SuperNode authentication key pair for the selected `CLIENT_ID`:
+Then run:
 
-- `<client_id>` — private key; keep it only on that client host
-- `<client_id>.pub` — public key; provide it through the client registration/authentication workflow
+```bash
+./setup.sh
+```
+
+Choose the client host role and the assigned client ID when prompted. In the production profile, setup now performs the complete client identity bootstrap automatically:
+
+1. Creates the client-specific EC P-384 SuperNode key pair if it does not already exist.
+2. Validates the server CA and client key pair.
+3. Connects to the SuperLink **Control API** at `SUPERLINK_CONTROL_ADDRESS` using TLS.
+4. Starts a temporary Python 3.11 Docker container.
+5. Installs exactly `flwr==1.33.0` inside that temporary container.
+6. Runs `flwr supernode register` with the client's public key.
+7. Treats an already-registered identity as success, so rerunning setup is safe.
+8. Leaves the client's private key exclusively on the client host.
+
+The registration helper is `scripts/register_supernode.py`. It mounts only the public key, CA certificate, and an ephemeral Flower CLI configuration into the temporary container. No private key is mounted into the registration container.
+
+The client operator should **not** need to install Flower or manually run `flwr supernode register`.
 
 The client host needs:
 
@@ -134,24 +120,26 @@ The client Compose contains exactly two services:
 
 ## 3. Network requirements
 
-The server host must allow inbound TCP traffic to Flower SuperLink port `9092` from the client hosts. The server-side application/control-plane ports remain on the server host.
+The server host must allow inbound TCP traffic to Flower SuperLink port `9092` from the client hosts and TCP `9093` for the Control API used during registration.
 
-Verify from each client host that the server endpoint is reachable before starting the SuperNode. Also verify that the hostname/IP in `SUPERLINK_ADDRESS` is present in the SuperLink certificate SAN.
+The registration container uses the client host's normal Docker bridge network. It does **not** depend on the server's Docker network existing on the client machine. The configured `SUPERLINK_CONTROL_ADDRESS` must therefore be a LAN-reachable DNS name or IP address.
 
-Do not replace the production endpoint with `superlink:9092` on a physical client host; that hostname exists only inside the server's Docker network.
+Also verify that the hostname/IP in `SUPERLINK_ADDRESS` and `SUPERLINK_CONTROL_ADDRESS` matches the SuperLink certificate SAN where applicable.
+
+Do not replace the production endpoint with `superlink:9092` or `superlink:9093` on a physical client host; those hostnames exist only inside the server's Docker network.
 
 ## 4. Step 7 acceptance test
 
 Use at least two physical client hosts with different IP addresses:
 
 1. Prepare the server host and create the starter server TLS credentials.
-2. Share the server's `ca.crt` with client-1 and client-2.
-3. Prepare client-1 with `CLIENT_ID=client-1`; setup creates its SuperNode private/public key pair.
-4. Prepare client-2 with `CLIENT_ID=client-2`; setup creates its SuperNode private/public key pair.
-5. Complete the SuperNode public-key registration/authentication workflow on the server.
-6. Start the server SuperLink.
-7. Start client-1 on host A.
-8. Start client-2 on host B.
+2. Start the server SuperLink with production TLS and SuperNode authentication enabled.
+3. Share the server's `ca.crt` with client-1 and client-2.
+4. Prepare client-1 with `CLIENT_ID=client-1`; setup creates its key pair and registers its public key automatically.
+5. Prepare client-2 with `CLIENT_ID=client-2`; setup creates its key pair and registers its public key automatically.
+6. Start client-1 on host A.
+7. Start client-2 on host B.
+8. Confirm both SuperNodes authenticate and connect to the SuperLink.
 9. Start the trainer on the server host.
 10. Confirm both clients participate in each configured round.
 11. Confirm FedAvg aggregation completes.
