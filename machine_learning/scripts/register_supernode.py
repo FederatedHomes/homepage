@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--superlink-address", required=True)
     parser.add_argument("--root-certificates", required=True, type=Path)
     parser.add_argument("--registration-profile", default="production-registration")
-    parser.add_argument("--network", default="machine_learning_flwr-network")
+    parser.add_argument("--network", default=os.environ.get("FLOWER_REGISTRATION_DOCKER_NETWORK", "bridge"))
     return parser.parse_args()
 
 
