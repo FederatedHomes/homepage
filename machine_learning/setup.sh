@@ -211,6 +211,38 @@ show_host_context() {
   echo
 }
 
+register_configured_clients() {
+  [ "${DEPLOYMENT_PROFILE:-development}" = production ] || return 0
+  local compose_file="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
+  local auth_dir="${SUPERNODE_AUTH_HOST_DIR:-./certificates/prod/auth}"
+  [ -f "$compose_file" ] || { echo "ERROR: Server Compose file not found: $compose_file" >&2; return 1; }
+  read_client_ids
+  if ((${#CLIENT_IDS[@]} < 2)); then echo "ERROR: At least 2 clients must be configured before registration." >&2; return 1; fi
+
+  echo "Registering configured SuperNodes using the lightweight Flower registration service..."
+  local client_id public_key
+  for client_id in "${CLIENT_IDS[@]}"; do
+    public_key="$auth_dir/$client_id.pub"
+    if [ ! -f "$public_key" ]; then
+      echo "ERROR: Public key for $client_id was not found on the server: $public_key" >&2
+      echo "Transfer only the public key from the client host; never transfer its private key." >&2
+      return 1
+    fi
+    echo
+    echo "Registering $client_id..."
+    if ! docker compose -f "$compose_file" run --rm client-registration \
+      supernode register \
+      "/app/certificates/prod/auth/$client_id.pub" \
+      production-deployment \
+      --format json; then
+      echo "ERROR: SuperNode registration failed for $client_id." >&2
+      return 1
+    fi
+  done
+  echo
+  echo "All configured SuperNodes are registered with the federation."
+}
+
 validate_auth_environment() {
   local role="$1" client_id="${2:-}"
   [ "${DEPLOYMENT_PROFILE:-development}" = production ] || return 0
@@ -259,10 +291,6 @@ prepare_host() {
   validate_auth_environment "$role" "$client_id"
   echo
   echo "Host preparation complete for role=$role${client_id:+, client=$client_id}."
-  if [ "$role" = client ]; then
-    echo "Copy this client's public key to the server: ${SUPERNODE_AUTH_HOST_DIR:-./certificates/prod/auth}/$client_id.pub"
-    echo "The server-side client_registration service will register it with the federation."
-  fi
 }
 
 generate_server_compose() {
@@ -281,12 +309,13 @@ generate_client_compose() {
 }
 
 start_server_federation() {
-  load_environment; ensure_host_dependencies server
-  [ "${DEPLOYMENT_PROFILE:-development}" = production ] || { echo "ERROR: Server infrastructure requires DEPLOYMENT_PROFILE=production." >&2; return 1; }
-  [ -f docker-compose.server.yml ] || generate_server_compose
-  [ -f docker-compose.registration.yml ] || { echo "ERROR: docker-compose.registration.yml not found." >&2; return 1; }
-  [ -f certificates/prod/tls/ca.crt ] || { echo "ERROR: certificates/prod/tls/ca.crt is required on the server." >&2; return 1; }
-  docker compose -f docker-compose.server.yml -f docker-compose.registration.yml up -d --build
+  generate_server_compose
+  echo "Starting server infrastructure..."
+  docker compose -f docker-compose.server.yml up -d --build superlink superexec-serverapp
+  if [ "${DEPLOYMENT_PROFILE:-development}" = production ]; then
+    register_configured_clients
+  fi
+  echo "Server infrastructure is running."
 }
 
 run_tests() {
