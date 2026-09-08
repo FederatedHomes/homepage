@@ -244,7 +244,7 @@ generate_client_compose() {
 
 start_server_federation() {
   generate_server_compose
-  echo "Starting server federation..."
+  echo "Starting server infrastructure..."
   docker compose -f docker-compose.server.yml up --build
 }
 

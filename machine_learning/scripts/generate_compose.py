@@ -207,8 +207,7 @@ def build_compose(
             "networks": ["flwr-network"],
             "depends_on": ["superlink", "superexec-serverapp"],
         }
-
-    if role == "all":
+        
         services["test-runner"] = {
             "image": SUPEREXEC_IMAGE,
             "build": dict(SUPEREXEC_BUILD),
