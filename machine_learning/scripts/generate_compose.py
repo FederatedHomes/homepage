@@ -93,13 +93,17 @@ def build_compose(
     superlink_command: list[str] = []
     supernode_prefix: list[str] = []
     if config.is_production:
-        superlink_command.extend(config.superlink_tls_args())
-        superlink_command.extend(config.superlink_auth_args())
-        superlink_command.extend(config.superlink_state_args())
-        supernode_prefix.extend(config.supernode_tls_args())
+        if role in {"all", "server"}:
+            superlink_command.extend(config.superlink_tls_args())
+            superlink_command.extend(config.superlink_auth_args())
+            superlink_command.extend(config.superlink_state_args())
+        if role in {"all", "client"}:
+            supernode_prefix.extend(config.supernode_tls_args())
     else:
-        superlink_command.append("--insecure")
-        supernode_prefix.append("--insecure")
+        if role in {"all", "server"}:
+            superlink_command.append("--insecure")
+        if role in {"all", "client"}:
+            supernode_prefix.append("--insecure")
 
     validate_no_insecure_flag(config.profile, superlink_command)
     validate_no_insecure_flag(config.profile, supernode_prefix)
