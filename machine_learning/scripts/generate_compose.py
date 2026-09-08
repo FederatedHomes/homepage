@@ -193,7 +193,9 @@ def build_compose(
             "depends_on": ["superlink"],
         }
 
-    if role in {"all", "server"}:
+    # The server deployment is infrastructure-only.  Training is started
+    # separately after the physical clients have registered and joined.
+    if role == "all":
         federation_profile = "production-deployment" if config.is_production else "local-deployment"
         services["trainer"] = {
             "image": "flwr/superexec:1.33.0",
