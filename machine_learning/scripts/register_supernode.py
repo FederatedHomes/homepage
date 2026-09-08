@@ -49,7 +49,6 @@ def build_config(address: str, ca_container_path: str, profile: str) -> str:
 def register(args: argparse.Namespace) -> int:
     require_file(args.public_key, "SuperNode public key")
     require_file(args.root_certificates, "SuperLink CA certificate")
-
     if not args.client_id.strip():
         raise SystemExit("ERROR: client ID must not be empty.")
 
@@ -64,7 +63,6 @@ def register(args: argparse.Namespace) -> int:
             build_config(args.superlink_address, "/app/ca.crt", args.registration_profile),
             encoding="utf-8",
         )
-
         command = [
             "docker", "run", "--rm",
             "--network", args.network,
@@ -80,27 +78,26 @@ def register(args: argparse.Namespace) -> int:
                 f"{args.registration_profile} --format json"
             ),
         ]
-
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         print(f"Registering SuperNode {args.client_id} with {args.superlink_address}...")
         result = subprocess.run(command, cwd=project_root, text=True, capture_output=True, env=env)
 
+    combined = f"{result.stdout}\n{result.stderr}".lower()
     if result.returncode != 0:
-        if result.stdout.strip():
-            print(result.stdout.strip())
-        if result.stderr.strip():
-            print(result.stderr.strip(), file=sys.stderr)
+        if "already registered" in combined or "already exists" in combined:
+            print(f"SuperNode {args.client_id} is already registered; continuing.")
+            return 0
+        if result.stdout.strip(): print(result.stdout.strip())
+        if result.stderr.strip(): print(result.stderr.strip(), file=sys.stderr)
         return result.returncode
 
     output = result.stdout.strip()
     if output:
         try:
-            parsed = json.loads(output)
-            print(json.dumps(parsed, indent=2))
+            print(json.dumps(json.loads(output), indent=2))
         except json.JSONDecodeError:
             print(output)
-
     print(f"SuperNode {args.client_id} registered successfully.")
     return 0
 
