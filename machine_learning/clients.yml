@@ -2,11 +2,14 @@ clients:
   - id: client-1
     data_dir: ./data/client-1
     checkpoint_dir: ./checkpoints/client-1
+    public_key: ./certificates/prod/auth/client-1.pub
 
   - id: client-2
     data_dir: ./data/client-2
     checkpoint_dir: ./checkpoints/client-2
+    public_key: ./certificates/prod/auth/client-2.pub
 
   - id: client-3
     data_dir: ./data/client-3
     checkpoint_dir: ./checkpoints/client-3
+    public_key: ./certificates/prod/auth/client-3.pub
