@@ -40,6 +40,8 @@ def validate_clients(clients: list[dict]) -> None:
         for key in ("data_dir", "checkpoint_dir"):
             if not str(client.get(key, "")).strip():
                 raise ValueError(f"Client '{client['id']}' must define '{key}'.")
+        if not str(client.get("public_key", "")).strip():
+            raise ValueError(f"Client '{client['id']}' must define 'public_key'.")
 
 
 def safe_id(client_id: str) -> str:
@@ -68,7 +70,6 @@ def build_compose(
     role: str = "all",
     client_id: str | None = None,
 ) -> dict:
-    """Build a Compose deployment for a server host, client host, or local all-in-one host."""
     validate_clients(clients)
     if role not in {"all", "server", "client"}:
         raise ValueError("Deployment role must be one of: all, server, client.")
@@ -134,19 +135,24 @@ def build_compose(
         services["superlink"] = superlink_service
 
         if config.is_production:
+            registration_volumes = [
+                "./.flwr:/root/.flwr:ro",
+                "./clients.yml:/app/clients.yml:ro",
+                f"{host_tls_dir}/ca.crt:/app/certificates/prod/tls/ca.crt:ro",
+            ]
+            for client in clients:
+                client_id = str(client["id"]).strip()
+                configured_public_key = Path(str(client["public_key"]).strip())
+                registration_volumes.append(
+                    f"{compose_host_path(configured_public_key)}:/app/certificates/prod/auth/{client_id}.pub:ro"
+                )
             services["client-registration"] = {
                 "image": REGISTRATION_IMAGE,
                 "build": dict(REGISTRATION_BUILD),
                 "container_name": "flwr_client_registration",
                 "working_dir": "/app",
-                "entrypoint": ["flwr"],
-                "command": ["--version"],
                 "networks": ["flwr-network"],
-                "volumes": [
-                    "./.flwr:/root/.flwr:ro",
-                    f"{host_auth_dir}:/app/certificates/prod/auth:ro",
-                    f"{host_tls_dir}/ca.crt:/app/certificates/prod/tls/ca.crt:ro",
-                ],
+                "volumes": registration_volumes,
                 "depends_on": ["superlink"],
             }
 
@@ -156,7 +162,6 @@ def build_compose(
             node = node_name(current_client_id)
             app = app_name(current_client_id)
             superlink_address = config.superlink_address
-
             node_command = [
                 *supernode_prefix,
                 "--superlink", superlink_address,
@@ -166,7 +171,6 @@ def build_compose(
             if config.is_production:
                 node_command.extend(config.supernode_auth_args(current_client_id))
             validate_no_insecure_flag(config.profile, node_command)
-
             services[node] = {
                 "image": SUPERNODE_IMAGE,
                 "container_name": f"flwr_{node.replace('-', '_')}",
@@ -179,22 +183,14 @@ def build_compose(
                     f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
                     f"{host_auth_dir}/{current_client_id}:{AUTH_CONTAINER_DIR}/{current_client_id}:ro",
                 ]
-
             services[app] = {
                 "image": SUPEREXEC_IMAGE,
                 "build": dict(SUPEREXEC_BUILD),
                 "container_name": f"flwr_{app.replace('-', '_')}",
                 "env_file": [".env"],
-                "command": [
-                    "--insecure",
-                    "--plugin-type", "clientapp",
-                    "--appio-api-address", f"{node}:{SUPERNODE_PORT}",
-                ],
+                "command": ["--insecure", "--plugin-type", "clientapp", "--appio-api-address", f"{node}:{SUPERNODE_PORT}"],
                 "networks": ["flwr-network"],
-                "volumes": [
-                    f"{client['data_dir']}:/app/data:ro",
-                    f"{client['checkpoint_dir']}:/app/checkpoints:rw",
-                ],
+                "volumes": [f"{client['data_dir']}:/app/data:ro", f"{client['checkpoint_dir']}:/app/checkpoints:rw"],
                 "environment": {CLIENT_ID_ENV: current_client_id},
                 "depends_on": [node],
             }
@@ -250,7 +246,6 @@ def main() -> None:
     parser.add_argument("--role", choices=["all", "server", "client"], default=os.environ.get(DEPLOYMENT_ROLE_ENV, "all"), help="Deployment host role")
     parser.add_argument("--client-id", default=os.environ.get(CLIENT_ID_ENV), help="Client ID for a client deployment")
     args = parser.parse_args()
-
     config_path = Path(args.config)
     output_path = Path(args.output)
     if not config_path.exists():
