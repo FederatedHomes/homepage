@@ -365,14 +365,36 @@ else:
         raise SystemExit("ERROR: Server deployment requires SuperLink persistent state configuration.")
     print(f"Validated SuperLink state directory: {config.superlink_state_host_dir}")
 
-missing = []
-for client in clients:
-    current_id = str(client.get("id", "")).strip()
-    if not config.supernode_auth_host_key(current_id).is_file():
-        missing.append(current_id)
-if missing:
-    raise SystemExit("Missing SuperNode authentication keys for: " + ", ".join(missing))
-print(f"Validated {len(clients)} SuperNode authentication key(s).")
+if role == "client":
+    private_key = config.supernode_auth_host_key(client_id)
+    public_key = private_key.with_name(private_key.name + ".pub")
+    missing = []
+    if not private_key.is_file():
+        missing.append(str(private_key))
+    if not public_key.is_file():
+        missing.append(str(public_key))
+    if missing:
+        raise SystemExit("Missing SuperNode authentication material: " + ", ".join(missing))
+    print(f"Validated SuperNode authentication key pair for {client_id}.")
+else:
+    registered = []
+    missing_public = []
+    for client in clients:
+        current_id = str(client.get("id", "")).strip()
+        if not current_id:
+            continue
+        public_key = config.supernode_auth_host_key(current_id).with_name(current_id + ".pub")
+        if public_key.is_file():
+            registered.append(current_id)
+        else:
+            missing_public.append(current_id)
+
+    if registered:
+        print("Validated registered SuperNode public key(s): " + ", ".join(registered))
+    if missing_public:
+        echo = "Clients not yet registered: " + ", ".join(missing_public)
+        print(echo)
+        print("Register each client's public key before starting that client.")
 PY
 }
 
@@ -426,17 +448,15 @@ generate_client_compose() {
   read_clients
   load_environment
   export DEPLOYMENT_ROLE=client
-
   local client_id
   client_id="$(select_client_id)"
   export CLIENT_ID="$client_id"
-
   create_directories client "$client_id"
   prepare_development_auth
   validate_auth_environment client "$client_id"
 
-  local output="${CLIENT_COMPOSE_FILE:-docker-compose.client-${client_id}.yml}"
-  echo "Generating Compose configuration for $client_id..."
+  local output="${CLIENT_COMPOSE_FILE:-docker-compose.client.yml}"
+  echo "Generating client Compose configuration for $client_id..."
   python3 scripts/generate_compose.py \
     --config clients.yml \
     --output "$output" \
@@ -450,102 +470,77 @@ generate_client_compose() {
 run_local_development_compose() {
   read_clients
   load_environment
-  echo "Generating local all-in-one DEVELOPMENT Compose configuration..."
+  export DEPLOYMENT_PROFILE=development
+  export DEPLOYMENT_ROLE=all
+  create_directories server
+  prepare_development_auth
+  validate_auth_environment all
+
+  local output="${DEV_COMPOSE_FILE:-docker-compose.generated.yml}"
   python3 scripts/generate_compose.py \
     --config clients.yml \
-    --output docker-compose.generated.yml \
+    --output "$output" \
     --profile development \
     --role all
-  echo "Generated docker-compose.generated.yml"
-  echo "This file is for local development/integration testing only."
+  docker compose -f "$output" up --build
 }
 
 run_tests() {
-  echo "=========================================="
-  echo "Running application tests in Docker"
-  echo "=========================================="
-  read_clients
-  if ! find tests -maxdepth 1 -name 'test_*.py' -print -quit | grep -q .; then
-    echo "ERROR: No pytest test files found in tests/."
-    return 1
-  fi
-
-  python3 scripts/generate_compose.py \
-    --config clients.yml \
-    --output docker-compose.test.yml \
-    --profile development \
-    --role all
-  docker compose -f docker-compose.test.yml run --build --rm test-runner
-  rm -f docker-compose.test.yml
-}
-
-start_server_training() {
   load_environment
-  export DEPLOYMENT_ROLE=server
-  local compose_file="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
-  if [ ! -f "$compose_file" ]; then
-    echo "Server Compose file not found; generating it now."
-    generate_server_compose
-  fi
-
-  echo "Starting federated training on the server host..."
-  if docker compose -f "$compose_file" up --build trainer; then
-    echo "Federated training completed successfully."
-    docker compose -f "$compose_file" down
-  else
-    echo "Federated training failed. Leaving the server stack running for inspection."
-    return 1
-  fi
+  export DEPLOYMENT_PROFILE=development
+  export DEPLOYMENT_ROLE=all
+  prepare_development_auth
+  docker compose -f docker-compose.yml run --rm test-runner
 }
 
-print_config() {
+show_configuration() {
+  load_environment
+  read_clients
   echo
   echo "Deployment profile: ${DEPLOYMENT_PROFILE:-development}"
-  echo "Deployment role:    ${DEPLOYMENT_ROLE:-not set}"
-  echo "SuperLink address:  ${SUPERLINK_ADDRESS:-not set}"
-  echo
+  echo "Deployment role: ${DEPLOYMENT_ROLE:-unset}"
+  echo "SuperLink address: ${SUPERLINK_ADDRESS:-superlink:9092}"
   echo "Configured clients:"
-  read_clients || return 1
   python3 - <<'PY'
 from pathlib import Path
 import yaml
 with Path("clients.yml").open("r", encoding="utf-8") as handle:
     clients = (yaml.safe_load(handle) or {}).get("clients", [])
 for client in clients:
-    print(f"  {str(client.get('id', '')).strip()}")
-    print(f"    data:        {str(client.get('data_dir', '')).strip()}")
-    print(f"    checkpoints: {str(client.get('checkpoint_dir', '')).strip()}")
+    print(f"  - {client.get('id')}: data={client.get('data_dir')}, checkpoints={client.get('checkpoint_dir')}")
 PY
-  echo
 }
 
-print_menu() {
-  cat <<'EOF'
+main_menu() {
+  while true; do
+    echo
+    echo "FederatedHomes Machine Learning Setup"
+    echo "  1) Prepare this host — choose SERVER or CLIENT role"
+    echo "  2) Generate SERVER Compose file"
+    echo "  3) Generate CLIENT Compose file for one configured client"
+    echo "  4) Start federated training on the SERVER host"
+    echo "  5) Run application tests in Docker"
+    echo "  6) Show deployment and client configuration"
+    echo "  7) Generate local all-in-one DEVELOPMENT Compose file"
+    echo "  8) Exit"
+    read -rp "Enter choice [1-8]: " menu_choice
 
-Federated Learning Setup
-
-Select an option:
-  1) Prepare this host — choose SERVER or CLIENT role
-  2) Generate SERVER Compose file
-  3) Generate CLIENT Compose file for one configured client
-  4) Start federated training on the SERVER host
-  5) Run application tests in Docker
-  6) Show deployment and client configuration
-  7) Generate local all-in-one DEVELOPMENT Compose file
-  8) Exit
-EOF
+    case "$menu_choice" in
+      1) prepare_host ;;
+      2) generate_server_compose ;;
+      3) generate_client_compose ;;
+      4)
+        load_environment
+        export DEPLOYMENT_ROLE=server
+        docker compose -f "${SERVER_COMPOSE_FILE:-docker-compose.server.yml}" up --build
+        ;;
+      5) run_tests ;;
+      6) show_configuration ;;
+      7) run_local_development_compose ;;
+      8) exit 0 ;;
+      *) echo "ERROR: Invalid menu choice." ;;
+    esac
+  done
 }
 
-print_menu
-read -rp "Enter choice [1-8]: " choice
-case "$choice" in
-  1) prepare_host ;;
-  2) generate_server_compose ;;
-  3) generate_client_compose ;;
-  4) start_server_training ;;
-  5) run_tests ;;
-  6) load_environment && print_config ;;
-  7) run_local_development_compose ;;
-  8) echo "Exiting."; exit 0 ;;
-  *) echo "Invalid choice. Exiting."; exit 1 ;;
-esac
+main_menu
