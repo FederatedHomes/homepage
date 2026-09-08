@@ -4,28 +4,97 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 cd "$ROOT_DIR"
 
+load_environment() {
+  if [ ! -f .env ]; then
+    if [ -f .env.example ]; then
+      cp .env.example .env
+      echo "Created .env from .env.example"
+    else
+      echo "ERROR: .env.example not found. Create .env before continuing."
+      return 1
+    fi
+  fi
+
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+}
+
+read_clients() {
+  if [ ! -f clients.yml ]; then
+    echo "ERROR: clients.yml not found."
+    return 1
+  fi
+}
+
+select_client_id() {
+  local selected="${CLIENT_ID:-}"
+  if [ -n "$selected" ]; then
+    echo "$selected"
+    return 0
+  fi
+
+  mapfile -t client_ids < <(python3 - <<'PY'
+from pathlib import Path
+import yaml
+with Path("clients.yml").open("r", encoding="utf-8") as handle:
+    clients = (yaml.safe_load(handle) or {}).get("clients", [])
+for client in clients:
+    client_id = str(client.get("id", "")).strip()
+    if client_id:
+        print(client_id)
+PY
+)
+
+  if ((${#client_ids[@]} == 0)); then
+    echo "ERROR: No clients are configured in clients.yml." >&2
+    return 1
+  fi
+
+  echo
+  echo "Select the client for this machine:" >&2
+  local index=1
+  for client_id in "${client_ids[@]}"; do
+    echo "  $index) $client_id" >&2
+    index=$((index + 1))
+  done
+  read -rp "Enter client number: " selection
+
+  if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#client_ids[@]}" ]; then
+    echo "ERROR: Invalid client selection." >&2
+    return 1
+  fi
+  echo "${client_ids[$((selection - 1))]}"
+}
+
 create_directories() {
+  local role="${1:-all}"
   mkdir -p data/global checkpoints/global
 
-  if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
+  if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ] && [ "$role" = "server" ]; then
     mkdir -p "$SUPERLINK_STATE_HOST_DIR"
   fi
 
-  if [ ! -f clients.yml ]; then
-    echo "Warning: clients.yml not found."
-    echo "Create clients.yml before running the federated learning stack."
-    return
-  fi
-
-  python3 - <<'PY'
+  read_clients
+  python3 - "$role" "${CLIENT_ID:-}" <<'PY'
 from pathlib import Path
+import sys
 import yaml
-config_path = Path("clients.yml")
-with config_path.open("r", encoding="utf-8") as handle:
-    config = yaml.safe_load(handle) or {}
-clients = config.get("clients", [])
+
+role = sys.argv[1]
+requested_client = sys.argv[2].strip()
+with Path("clients.yml").open("r", encoding="utf-8") as handle:
+    clients = (yaml.safe_load(handle) or {}).get("clients", [])
+
 if len(clients) < 2:
     raise SystemExit("ERROR: clients.yml must define at least 2 clients.")
+
+if role == "client":
+    clients = [c for c in clients if str(c.get("id", "")).strip() == requested_client]
+    if not clients:
+        raise SystemExit(f"ERROR: Client ID '{requested_client}' is not defined in clients.yml.")
+
 for client in clients:
     client_id = str(client.get("id", "")).strip()
     data_dir = str(client.get("data_dir", "")).strip()
@@ -40,24 +109,6 @@ for client in clients:
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
     print(f"Prepared {client_id}: data={data_dir}, checkpoints={checkpoint_dir}")
 PY
-}
-
-create_env_file() {
-  if [ ! -f .env ]; then
-    if [ -f .env.example ]; then
-      cp .env.example .env
-      echo "Created .env from .env.example"
-    else
-      echo "Warning: .env.example not found."
-      echo "Create .env manually if needed."
-    fi
-  fi
-  if [ -f .env ]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-  fi
 }
 
 prepare_development_auth() {
@@ -96,136 +147,152 @@ PY
 }
 
 validate_auth_environment() {
-  local profile="${DEPLOYMENT_PROFILE:-development}"
-  if [ "$profile" != "production" ]; then
+  local role="${1:-server}"
+  if [ "${DEPLOYMENT_PROFILE:-development}" != "production" ]; then
     return
   fi
-  echo "Validating production TLS, SuperNode authentication, and SuperLink state material..."
-  python3 - <<'PY'
-from src.deployment_config import validate_environment
-config = validate_environment(require_files=True)
-print(f"Validated production SuperLink: {config.superlink_address}")
-print(f"Validated SuperNode auth directory: {config.supernode_auth_host_dir}")
-print(f"Validated SuperLink state directory: {config.superlink_state_host_dir}")
-PY
 
-  python3 - <<'PY'
+  echo "Validating production TLS, SuperNode authentication, and deployment state..."
+  python3 - "$role" "${CLIENT_ID:-}" <<'PY'
 from pathlib import Path
+import sys
 import yaml
 from src.deployment_config import load_deployment_config
-config = load_deployment_config()
+
+role = sys.argv[1]
+client_id = sys.argv[2].strip()
+config = load_deployment_config(role=role, require_files=True)
+print(f"Validated production SuperLink endpoint: {config.superlink_address}")
+print(f"Validated TLS material: {config.tls_certificate_host_dir}")
+
 with Path("clients.yml").open("r", encoding="utf-8") as handle:
     clients = (yaml.safe_load(handle) or {}).get("clients", [])
+
+if role == "client":
+    if not client_id:
+        raise SystemExit("ERROR: CLIENT_ID must be set for a client deployment.")
+    clients = [c for c in clients if str(c.get("id", "")).strip() == client_id]
+    if not clients:
+        raise SystemExit(f"ERROR: Client ID '{client_id}' is not defined in clients.yml.")
+else:
+    if config.superlink_state_host_dir is None:
+        raise SystemExit("ERROR: Server deployment requires SuperLink persistent state configuration.")
+    print(f"Validated SuperLink state directory: {config.superlink_state_host_dir}")
+
 missing = []
 for client in clients:
-    client_id = str(client.get("id", "")).strip()
-    if not config.supernode_auth_host_key(client_id).is_file():
-        missing.append(client_id)
+    current_id = str(client.get("id", "")).strip()
+    if not config.supernode_auth_host_key(current_id).is_file():
+        missing.append(current_id)
 if missing:
     raise SystemExit("Missing SuperNode authentication keys for: " + ", ".join(missing))
-print(f"Validated {len(clients)} SuperNode authentication keys.")
+print(f"Validated {len(clients)} SuperNode authentication key(s).")
 PY
 }
 
-generate_compose_file() {
-  if [ ! -f clients.yml ]; then
-    echo "ERROR: clients.yml not found."
-    return 1
-  fi
-  if [ ! -f scripts/generate_compose.py ]; then
-    echo "ERROR: scripts/generate_compose.py not found."
-    return 1
-  fi
-  validate_auth_environment
-  echo "Generating Docker Compose configuration..."
-  python3 scripts/generate_compose.py --config clients.yml --output docker-compose.generated.yml --profile "${DEPLOYMENT_PROFILE:-development}"
-  if [ ! -f docker-compose.generated.yml ]; then
-    echo "ERROR: Docker Compose file was not generated."
-    return 1
-  fi
-  echo "Generated docker-compose.generated.yml"
-}
-
-warn_missing_csvs() {
-  if [ ! -f clients.yml ]; then
-    echo "WARNING: clients.yml not found; cannot check client CSV files."
-    return
-  fi
-  python3 - <<'PY'
-from pathlib import Path
-import yaml
-with Path("clients.yml").open("r", encoding="utf-8") as handle:
-    clients = (yaml.safe_load(handle) or {}).get("clients", [])
-missing = []
-for client in clients:
-    data_dir = Path(str(client.get("data_dir", "")).strip())
-    for filename in ("train.csv", "val.csv"):
-        if not (data_dir / filename).is_file():
-            missing.append(str(data_dir / filename))
-if missing:
-    print("WARNING: Some client CSV files are missing.")
-    print("\nThe affected clients will use synthetic mock data until\nthe required CSV files are provided.\n")
-    print("Missing files:")
-    for file in missing:
-        print(f"  {file}")
-else:
-    print("All configured client train/validation CSV files are present.")
-PY
-}
-
-setup() {
-  echo "=========================================="
-  echo "Federated Learning Environment Setup"
-  echo "=========================================="
-  create_env_file
-  create_directories
+generate_server_compose() {
+  read_clients
+  load_environment
+  create_directories server
   prepare_development_auth
-  validate_auth_environment
-  generate_compose_file
-  warn_missing_csvs
-  echo
-  echo "Setup completed."
+  validate_auth_environment server
+
+  local output="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
+  echo "Generating server Compose configuration..."
+  python3 scripts/generate_compose.py \
+    --config clients.yml \
+    --output "$output" \
+    --profile "${DEPLOYMENT_PROFILE:-development}" \
+    --role server
+  echo "Generated $output"
+  echo "Server host services: SuperLink, ServerApp, and trainer."
+}
+
+generate_client_compose() {
+  read_clients
+  load_environment
+  local client_id
+  client_id="$(select_client_id)"
+  export CLIENT_ID="$client_id"
+
+  create_directories client
+  prepare_development_auth
+  validate_auth_environment client
+
+  local output="${CLIENT_COMPOSE_FILE:-docker-compose.client-${client_id}.yml}"
+  echo "Generating Compose configuration for $client_id..."
+  python3 scripts/generate_compose.py \
+    --config clients.yml \
+    --output "$output" \
+    --profile "${DEPLOYMENT_PROFILE:-development}" \
+    --role client \
+    --client-id "$client_id"
+  echo "Generated $output"
+  echo "Client host services: SuperNode and ClientApp for $client_id."
+}
+
+run_local_development_compose() {
+  read_clients
+  load_environment
+  echo "Generating local all-in-one development Compose configuration..."
+  python3 scripts/generate_compose.py \
+    --config clients.yml \
+    --output docker-compose.generated.yml \
+    --profile development \
+    --role all
+  echo "Generated docker-compose.generated.yml"
 }
 
 run_tests() {
   echo "=========================================="
   echo "Running application tests in Docker"
   echo "=========================================="
-  if [ ! -d tests ]; then echo "ERROR: tests directory not found."; return 1; fi
-  if ! find tests -maxdepth 1 -name 'test_*.py' -print -quit | grep -q .; then echo "ERROR: No pytest test files found in tests/."; return 1; fi
-  if [ ! -f docker-compose.generated.yml ]; then generate_compose_file; fi
-  echo "=========================================="
-  echo "Building shared Flower SuperExec image"
-  echo "=========================================="
+  read_clients
+  if ! find tests -maxdepth 1 -name 'test_*.py' -print -quit | grep -q .; then
+    echo "ERROR: No pytest test files found in tests/."
+    return 1
+  fi
+
   docker build -f Dockerfile.superexec -t flwr_superexec:local .
-  echo
-  echo "Shared SuperExec image built successfully."
-  echo
-  docker compose -f docker-compose.generated.yml run --rm test-runner
+  python3 scripts/generate_compose.py \
+    --config clients.yml \
+    --output docker-compose.test.yml \
+    --profile development \
+    --role all
+  docker compose -f docker-compose.test.yml run --rm test-runner
+  rm -f docker-compose.test.yml
 }
 
-start_trainer() {
-  if [ ! -f docker-compose.generated.yml ]; then generate_compose_file; fi
+start_server_training() {
+  load_environment
+  local compose_file="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
+  if [ ! -f "$compose_file" ]; then
+    echo "Server Compose file not found; generating it now."
+    generate_server_compose
+  fi
+
   docker build -f Dockerfile.superexec -t flwr_superexec:local .
-  if docker compose -f docker-compose.generated.yml up trainer; then
-    echo "Trainer completed successfully."
-    docker compose -f docker-compose.generated.yml down
+  echo "Starting federated training on the server host..."
+  if docker compose -f "$compose_file" up trainer; then
+    echo "Federated training completed successfully."
+    docker compose -f "$compose_file" down
   else
-    echo "Trainer exited with an error."
-    echo "Leaving the Compose stack running for inspection."
+    echo "Federated training failed. Leaving the server stack running for inspection."
     return 1
   fi
 }
 
 print_config() {
   echo
+  echo "Deployment profile: ${DEPLOYMENT_PROFILE:-development}"
+  echo "Deployment role:    ${DEPLOYMENT_ROLE:-not set}"
+  echo "SuperLink address:  ${SUPERLINK_ADDRESS:-not set}"
+  echo
   echo "Configured clients:"
+  read_clients || return 1
   python3 - <<'PY'
 from pathlib import Path
 import yaml
-if not Path("clients.yml").exists():
-    print("  clients.yml not found")
-    raise SystemExit(0)
 with Path("clients.yml").open("r", encoding="utf-8") as handle:
     clients = (yaml.safe_load(handle) or {}).get("clients", [])
 for client in clients:
@@ -239,26 +306,46 @@ PY
 print_menu() {
   cat <<'EOF'
 
+Federated Learning Setup
+
 Select an option:
-  1) Setup required directories, authentication material, compose configuration, and environment file.
-  2) Generate Compose configuration only
-  3) Start the trainer service
-  4) Setup and then start the trainer
+  1) Prepare this host (environment, directories, and required authentication material)
+  2) Generate SERVER Compose file
+  3) Generate CLIENT Compose file for one configured client
+  4) Start federated training on the SERVER host
   5) Run application tests in Docker
-  6) Show configured clients
-  7) Exit
+  6) Show deployment and client configuration
+  7) Generate local all-in-one DEVELOPMENT Compose file
+  8) Exit
 EOF
 }
 
 print_menu
-read -rp "Enter choice [1-7]: " choice
+read -rp "Enter choice [1-8]: " choice
 case "$choice" in
-  1) setup ;;
-  2) create_env_file && generate_compose_file ;;
-  3) start_trainer ;;
-  4) setup && start_trainer ;;
+  1)
+    load_environment
+    role="${DEPLOYMENT_ROLE:-server}"
+    if [ "$role" = "client" ]; then
+      client_id="$(select_client_id)"
+      export CLIENT_ID="$client_id"
+      create_directories client
+      prepare_development_auth
+      validate_auth_environment client
+      echo "Host preparation completed for client: $client_id"
+    else
+      create_directories server
+      prepare_development_auth
+      validate_auth_environment server
+      echo "Server host preparation completed."
+    fi
+    ;;
+  2) generate_server_compose ;;
+  3) generate_client_compose ;;
+  4) start_server_training ;;
   5) run_tests ;;
-  6) print_config ;;
-  7) echo "Exiting."; exit 0 ;;
+  6) load_environment && print_config ;;
+  7) run_local_development_compose ;;
+  8) echo "Exiting."; exit 0 ;;
   *) echo "Invalid choice. Exiting."; exit 1 ;;
 esac
