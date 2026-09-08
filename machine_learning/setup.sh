@@ -30,10 +30,10 @@ select_host_role() {
     printf '%s\n' "$configured_role"
     return 0
   fi
-  echo
-  echo "What type of host are you preparing?"
-  echo "  1) Server host — runs Flower SuperLink and ServerApp"
-  echo "  2) Client host — runs one SuperNode and one ClientApp"
+  printf '\n' >&2
+  printf '%s\n' "What type of host are you preparing?" >&2
+  printf '%s\n' "  1) Server host — runs Flower SuperLink and ServerApp" >&2
+  printf '%s\n' "  2) Client host — runs one SuperNode and one ClientApp" >&2
   read -rp "Enter choice [1-2]: " role_choice
   case "$role_choice" in
     1) printf '%s\n' server ;;
@@ -56,10 +56,10 @@ for client in clients:
 PY
 )
   if ((${#client_ids[@]} == 0)); then echo "ERROR: No clients are configured in clients.yml." >&2; return 1; fi
-  echo
-  echo "Select the client assigned to this machine:"
+  printf '\n' >&2
+  printf '%s\n' "Select the client assigned to this machine:" >&2
   local index=1
-  for client_id in "${client_ids[@]}"; do echo "  $index) $client_id"; index=$((index + 1)); done
+  for client_id in "${client_ids[@]}"; do printf '  %s) %s\n' "$index" "$client_id" >&2; index=$((index + 1)); done
   read -rp "Enter client number: " selection
   if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#client_ids[@]}" ]; then
     echo "ERROR: Invalid client selection." >&2; return 1
@@ -301,9 +301,9 @@ main_menu() {
       6) show_config ;;
       7) run_local_development_compose ;;
       8) exit 0 ;;
-      *) echo "ERROR: Invalid option." >&2 ;;
+      *) echo "ERROR: Invalid option. Please choose 1-8." >&2 ;;
     esac
   done
 }
 
-main_menu "$@"
+main_menu
