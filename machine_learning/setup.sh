@@ -486,11 +486,23 @@ run_local_development_compose() {
 }
 
 run_tests() {
+  read_clients
   load_environment
   export DEPLOYMENT_PROFILE=development
   export DEPLOYMENT_ROLE=all
   prepare_development_auth
-  docker compose -f docker-compose.yml run --rm test-runner
+  validate_auth_environment all
+
+  local output="${DEV_COMPOSE_FILE:-docker-compose.generated.yml}"
+  echo "Generating development Compose configuration for application tests..."
+  python3 scripts/generate_compose.py \
+    --config clients.yml \
+    --output "$output" \
+    --profile development \
+    --role all
+  echo "Generated $output"
+  echo "Running application tests in Docker..."
+  docker compose -f "$output" run --rm test-runner
 }
 
 show_configuration() {
