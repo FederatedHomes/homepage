@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an N-client Flower 1.33.0 Docker Compose deployment."""
+"""Generate Flower 1.33.0 Docker Compose deployments for server or client hosts."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import argparse
 import os
 from pathlib import Path
 import sys
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
 import yaml
 
 from src.deployment_config import DeploymentProfile, load_deployment_config, validate_no_insecure_flag
@@ -19,6 +21,8 @@ SUPERNODE_IMAGE = "flwr/supernode:1.33.0"
 SUPEREXEC_IMAGE = "flwr_superexec:local"
 TLS_CONTAINER_DIR = "/etc/flower/tls"
 AUTH_CONTAINER_DIR = "/etc/flower/auth"
+DEPLOYMENT_ROLE_ENV = "DEPLOYMENT_ROLE"
+CLIENT_ID_ENV = "CLIENT_ID"
 
 
 def validate_clients(clients: list[dict]) -> None:
@@ -55,8 +59,18 @@ def compose_host_path(path: Path) -> str:
     return value
 
 
-def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = DeploymentProfile.DEVELOPMENT) -> dict:
+def build_compose(
+    clients: list[dict],
+    *,
+    profile: DeploymentProfile | str = DeploymentProfile.DEVELOPMENT,
+    role: str = "all",
+    client_id: str | None = None,
+) -> dict:
+    """Build a Compose deployment for a server host, client host, or local all-in-one host."""
     validate_clients(clients)
+    if role not in {"all", "server", "client"}:
+        raise ValueError("Deployment role must be one of: all, server, client.")
+
     profile_value = profile.value if isinstance(profile, DeploymentProfile) else profile
     if profile_value == DeploymentProfile.PRODUCTION.value:
         config = load_deployment_config()
@@ -65,6 +79,17 @@ def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = Dep
             "DEPLOYMENT_PROFILE": DeploymentProfile.DEVELOPMENT.value,
             "SUPERLINK_ADDRESS": os.environ.get("SUPERLINK_ADDRESS", "superlink:9092"),
         })
+
+    selected_clients = clients
+    if role == "client":
+        resolved_client_id = (client_id or os.environ.get(CLIENT_ID_ENV, "")).strip()
+        if not resolved_client_id:
+            raise ValueError("Client deployment requires --client-id or CLIENT_ID.")
+        selected_clients = [client for client in clients if str(client["id"]).strip() == resolved_client_id]
+        if not selected_clients:
+            raise ValueError(f"Client ID '{resolved_client_id}' is not defined in clients.yml.")
+        if len(selected_clients) != 1:
+            raise ValueError(f"Client ID '{resolved_client_id}' must be unique in clients.yml.")
 
     superlink_command: list[str] = []
     supernode_prefix: list[str] = []
@@ -83,96 +108,112 @@ def build_compose(clients: list[dict], *, profile: DeploymentProfile | str = Dep
     host_tls_dir = os.environ.get("TLS_CERTIFICATE_HOST_DIR", "./certificates/prod")
     host_auth_dir = os.environ.get("SUPERNODE_AUTH_HOST_DIR", "./certificates/prod/auth")
 
-    superlink_service = {
-        "image": "flwr/superlink:1.33.0",
-        "container_name": "flwr_superlink",
-        "command": [*superlink_command, "--isolation", "process"],
-        "ports": ["9091:9091", "9092:9092", "9093:9093"],
-        "networks": ["flwr-network"],
-    }
-    if config.is_production:
-        assert config.superlink_state_host_dir is not None
-        state_host_dir = compose_host_path(config.superlink_state_host_dir)
-        superlink_service["volumes"] = [
-            f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
-            f"{host_tls_dir}/superlink.crt:{TLS_CONTAINER_DIR}/superlink.crt:ro",
-            f"{host_tls_dir}/superlink.key:{TLS_CONTAINER_DIR}/superlink.key:ro",
-            f"{state_host_dir}:{config.superlink_state_dir}:rw",
-        ]
+    services: dict[str, dict] = {}
 
-    services = {"superlink": superlink_service}
+    if role in {"all", "server"}:
+        superlink_service = {
+            "image": "flwr/superlink:1.33.0",
+            "container_name": "flwr_superlink",
+            "command": [*superlink_command, "--isolation", "process"],
+            "ports": ["9091:9091", "9092:9092", "9093:9093"],
+            "networks": ["flwr-network"],
+        }
+        if config.is_production:
+            assert config.superlink_state_host_dir is not None
+            state_host_dir = compose_host_path(config.superlink_state_host_dir)
+            superlink_service["volumes"] = [
+                f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
+                f"{host_tls_dir}/superlink.crt:{TLS_CONTAINER_DIR}/superlink.crt:ro",
+                f"{host_tls_dir}/superlink.key:{TLS_CONTAINER_DIR}/superlink.key:ro",
+                f"{state_host_dir}:{config.superlink_state_dir}:rw",
+            ]
+        services["superlink"] = superlink_service
+
     node_services: list[str] = []
     app_services: list[str] = []
 
-    for client in clients:
-        client_id = str(client["id"]).strip()
-        node = node_name(client_id)
-        app = app_name(client_id)
-        node_services.append(node)
-        app_services.append(app)
+    if role in {"all", "client"}:
+        for client in selected_clients:
+            current_client_id = str(client["id"]).strip()
+            node = node_name(current_client_id)
+            app = app_name(current_client_id)
+            node_services.append(node)
+            app_services.append(app)
 
-        node_command = [
-            *supernode_prefix,
-            "--superlink", "superlink:9092",
-            "--clientappio-api-address", f"0.0.0.0:{SUPERNODE_PORT}",
-            "--isolation", "process",
-        ]
-        if config.is_production:
-            node_command.extend(config.supernode_auth_args(client_id))
-        validate_no_insecure_flag(config.profile, node_command)
+            if config.is_production:
+                superlink_address = config.superlink_address
+            else:
+                superlink_address = "superlink:9092"
 
-        services[node] = {
-            "container_name": f"flwr_{node.replace('-', '_')}",
-            "command": node_command,
+            node_command = [
+                *supernode_prefix,
+                "--superlink", superlink_address,
+                "--clientappio-api-address", f"0.0.0.0:{SUPERNODE_PORT}",
+                "--isolation", "process",
+            ]
+            if config.is_production:
+                node_command.extend(config.supernode_auth_args(current_client_id))
+            validate_no_insecure_flag(config.profile, node_command)
+
+            services[node] = {
+                "container_name": f"flwr_{node.replace('-', '_')}",
+                "command": node_command,
+                "networks": ["flwr-network"],
+                "depends_on": [] if role == "client" else ["superlink"],
+            }
+            if config.is_production:
+                services[node]["volumes"] = [
+                    f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
+                    f"{host_auth_dir}/{current_client_id}:{AUTH_CONTAINER_DIR}/{current_client_id}:ro",
+                ]
+
+            services[app] = {
+                "container_name": f"flwr_{app.replace('-', '_')}",
+                "env_file": [".env"],
+                "command": [
+                    "--insecure",
+                    "--plugin-type", "clientapp",
+                    "--appio-api-address", f"{node}:{SUPERNODE_PORT}",
+                ],
+                "networks": ["flwr-network"],
+                "volumes": [f"{client['data_dir']}:${{DATA_DIR}}", f"{client['checkpoint_dir']}:${{CHECKPOINT_DIR}}"],
+                "environment": {CLIENT_ID_ENV: current_client_id},
+                "depends_on": [node],
+            }
+
+    if role in {"all", "server"}:
+        services["superexec-serverapp"] = {
+            "container_name": "flwr_superexec_serverapp",
+            "env_file": [".env"],
+            "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
             "networks": ["flwr-network"],
+            "volumes": ["./checkpoints/global:${CHECKPOINT_DIR}", "./data/global:${DATA_DIR}"],
             "depends_on": ["superlink"],
         }
-        if config.is_production:
-            services[node]["volumes"] = [
-                f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
-                f"{host_auth_dir}/{client_id}:{AUTH_CONTAINER_DIR}/{client_id}:ro",
-            ]
 
-        services[app] = {
-            "container_name": f"flwr_{app.replace('-', '_')}",
-            "env_file": [".env"],
-            "command": ["--insecure", "--plugin-type", "clientapp", "--appio-api-address", f"{node}:{SUPERNODE_PORT}"],
+    if role in {"all", "server"}:
+        federation_profile = "production-deployment" if config.is_production else "local-deployment"
+        services["trainer"] = {
+            "image": "flwr/superexec:1.33.0",
+            "container_name": "flwr_trainer",
+            "entrypoint": ["flwr"],
+            "command": ["run", ".", federation_profile, "--stream"],
+            "working_dir": "/app",
+            "volumes": [".:/app"],
             "networks": ["flwr-network"],
-            "volumes": [f"{client['data_dir']}:${{DATA_DIR}}", f"{client['checkpoint_dir']}:${{CHECKPOINT_DIR}}"],
-            "environment": {"CLIENT_ID": client_id},
-            "depends_on": [node, "superlink"],
+            "depends_on": ["superlink", "superexec-serverapp"],
         }
 
-    services["superexec-serverapp"] = {
-        "container_name": "flwr_superexec_serverapp",
-        "env_file": [".env"],
-        "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
-        "networks": ["flwr-network"],
-        "volumes": ["./checkpoints/global:${CHECKPOINT_DIR}", "./data/global:${DATA_DIR}"],
-        "depends_on": ["superlink"],
-    }
-
-    federation_profile = "production-deployment" if config.is_production else "local-deployment"
-    services["trainer"] = {
-        "image": "flwr/superexec:1.33.0",
-        "container_name": "flwr_trainer",
-        "entrypoint": ["flwr"],
-        "command": ["run", ".", federation_profile, "--stream"],
-        "working_dir": "/app",
-        "volumes": [".:/app"],
-        "networks": ["flwr-network"],
-        "depends_on": ["superlink", "superexec-serverapp", *node_services, *app_services],
-    }
-
-    services["test-runner"] = {
-        "container_name": "flwr_test_runner",
-        "entrypoint": ["pytest"],
-        "command": ["tests/", "-v"],
-        "working_dir": "/app",
-        "environment": {"PYTHONPATH": "/app"},
-        "volumes": [".:/app"],
-        "networks": ["flwr-network"],
-    }
+    if role == "all":
+        services["test-runner"] = {
+            "container_name": "flwr_test_runner",
+            "entrypoint": ["pytest"],
+            "command": ["tests/", "-v"],
+            "working_dir": "/app",
+            "environment": {"PYTHONPATH": "/app"},
+            "volumes": [".:/app"],
+            "networks": ["flwr-network"],
+        }
 
     return {"networks": {"flwr-network": {"driver": "bridge"}}, "services": services, "volumes": {"data": {}, "checkpoints": {}}}
 
@@ -198,11 +239,14 @@ def render_compose(compose: dict) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate an N-client Flower 1.33.0 Docker Compose deployment.")
+    parser = argparse.ArgumentParser(description="Generate a Flower 1.33.0 Docker Compose deployment.")
     parser.add_argument("--config", default="clients.yml", help="Path to clients.yml")
     parser.add_argument("--output", default="docker-compose.generated.yml", help="Output Docker Compose file")
     parser.add_argument("--profile", choices=[profile.value for profile in DeploymentProfile], default=os.environ.get("DEPLOYMENT_PROFILE", DeploymentProfile.DEVELOPMENT.value), help="Deployment security profile")
+    parser.add_argument("--role", choices=["all", "server", "client"], default=os.environ.get(DEPLOYMENT_ROLE_ENV, "all"), help="Deployment host role")
+    parser.add_argument("--client-id", default=os.environ.get(CLIENT_ID_ENV), help="Client ID for a client deployment")
     args = parser.parse_args()
+
     config_path = Path(args.config)
     output_path = Path(args.output)
     if not config_path.exists():
@@ -210,9 +254,9 @@ def main() -> None:
     with config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     clients = config.get("clients", [])
-    compose = build_compose(clients, profile=args.profile)
+    compose = build_compose(clients, profile=args.profile, role=args.role, client_id=args.client_id)
     output_path.write_text(render_compose(compose), encoding="utf-8")
-    print(f"Generated {output_path} for {len(clients)} clients ({args.profile} profile).")
+    print(f"Generated {output_path} for {len(compose['services'])} services ({args.profile}, {args.role} role).")
 
 
 if __name__ == "__main__":
