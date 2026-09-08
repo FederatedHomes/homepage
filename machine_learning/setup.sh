@@ -37,7 +37,7 @@ select_host_role() {
 
   echo >&2
   echo "What type of host are you preparing?" >&2
-  echo "  1) Server host — runs Flower SuperLink, ServerApp, and trainer" >&2
+  echo "  1) Server host — runs Flower SuperLink and ServerApp" >&2
   echo "  2) Client host — runs one SuperNode and one ClientApp" >&2
   read -rp "Enter choice [1-2]: " role_choice
 
@@ -91,24 +91,89 @@ PY
   printf '%s\n' "${client_ids[$((selection - 1))]}"
 }
 
+create_certificate_placeholders() {
+  local role="$1"
+  local tls_dir="${TLS_CERTIFICATE_HOST_DIR:-./certificates/prod}"
+  mkdir -p "$tls_dir"
+
+  local files=("ca.crt")
+  if [ "$role" = "server" ]; then
+    files+=("superlink.crt" "superlink.key")
+  fi
+
+  local file
+  for file in "${files[@]}"; do
+    if [ -e "$tls_dir/$file" ]; then
+      continue
+    fi
+    case "$file" in
+      ca.crt)
+        cat > "$tls_dir/$file" <<'EOF'
+-----BEGIN CERTIFICATE-----
+REPLACE_WITH_REAL_PRODUCTION_CA_CERTIFICATE
+-----END CERTIFICATE-----
+EOF
+        ;;
+      superlink.crt)
+        cat > "$tls_dir/$file" <<'EOF'
+-----BEGIN CERTIFICATE-----
+REPLACE_WITH_REAL_PRODUCTION_SUPERLINK_CERTIFICATE
+-----END CERTIFICATE-----
+EOF
+        ;;
+      superlink.key)
+        cat > "$tls_dir/$file" <<'EOF'
+-----BEGIN PRIVATE KEY-----
+REPLACE_WITH_REAL_PRODUCTION_SUPERLINK_PRIVATE_KEY
+-----END PRIVATE KEY-----
+EOF
+        chmod 600 "$tls_dir/$file"
+        ;;
+    esac
+    echo "Created production certificate placeholder: $tls_dir/$file"
+  done
+
+  cat > "$tls_dir/README_PLACEHOLDERS.txt" <<'EOF'
+PRODUCTION TLS CERTIFICATE PLACEHOLDERS
+
+These files are intentionally placeholder files and are NOT valid TLS material.
+Replace them with certificates and keys issued by your production PKI before
+starting the production federation.
+
+Required on the SERVER host:
+  ca.crt         - CA certificate used to trust the federation TLS certificate
+  superlink.crt  - SuperLink server certificate; its SAN must match SUPERLINK_ADDRESS
+  superlink.key   - SuperLink server private key
+
+Required on each CLIENT host:
+  ca.crt         - Same CA certificate that signed the SuperLink certificate
+
+Do not copy superlink.key to client hosts.
+Do not commit real production certificates or private keys to source control.
+EOF
+  echo "TLS placeholder guidance: $tls_dir/README_PLACEHOLDERS.txt"
+}
+
 create_directories() {
   local role="$1"
 
   if [ "$role" = "server" ]; then
-    # Server-only persistent/runtime directories. Client data never belongs here.
-    mkdir -p "${SERVER_DATA_HOST_DIR:-./data/global}" "${SERVER_CHECKPOINT_HOST_DIR:-./checkpoints/global}"
-    if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
-      mkdir -p "$SUPERLINK_STATE_HOST_DIR"
-      echo "Prepared SuperLink state directory: $SUPERLINK_STATE_HOST_DIR"
+    if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ]; then
+      if [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
+        mkdir -p "$SUPERLINK_STATE_HOST_DIR"
+        echo "Prepared SuperLink state directory: $SUPERLINK_STATE_HOST_DIR"
+      fi
+      create_certificate_placeholders server
     fi
-    echo "Prepared server data directory: ${SERVER_DATA_HOST_DIR:-./data/global}"
-    echo "Prepared server checkpoint directory: ${SERVER_CHECKPOINT_HOST_DIR:-./checkpoints/global}"
     return 0
   fi
 
   if [ "$role" = "client" ]; then
     local client_id="${2:-}"
     read_clients
+    if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ]; then
+      create_certificate_placeholders client
+    fi
     python3 - "$client_id" <<'PY'
 from pathlib import Path
 import sys
@@ -141,20 +206,37 @@ PY
 }
 
 prepare_development_auth() {
-  local role="$1"
-  if [ "$role" != "client" ] || [ "${DEPLOYMENT_PROFILE:-development}" != "development" ]; then
+  if [ "${DEPLOYMENT_PROFILE:-development}" != "development" ]; then
     return
   fi
   if [ ! -f clients.yml ] || [ ! -f scripts/generate_supernode_auth.py ]; then
     return
   fi
-  local client_id="${2:-}"
   local auth_dir="${DEV_SUPERNODE_AUTH_DIR:-certificates/dev/auth}"
-  if [ ! -f "$auth_dir/$client_id" ] || [ ! -f "$auth_dir/$client_id.pub" ]; then
-    echo "Generating development-only SuperNode identity for $client_id in $auth_dir"
-    python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "$client_id"
+  mapfile -t client_ids < <(python3 - <<'PY'
+from pathlib import Path
+import yaml
+with Path("clients.yml").open("r", encoding="utf-8") as handle:
+    config = yaml.safe_load(handle) or {}
+for client in config.get("clients", []):
+    print(str(client.get("id", "")).strip())
+PY
+)
+  if ((${#client_ids[@]} == 0)); then
+    return
+  fi
+  local missing=0
+  for client_id in "${client_ids[@]}"; do
+    if [ ! -f "$auth_dir/$client_id" ] || [ ! -f "$auth_dir/$client_id.pub" ]; then
+      missing=1
+      break
+    fi
+  done
+  if [ "$missing" -eq 1 ]; then
+    echo "Generating development-only SuperNode identities in $auth_dir"
+    python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "${client_ids[@]}"
   else
-    echo "Development SuperNode identity already exists in $auth_dir for $client_id"
+    echo "Development SuperNode identities already exist in $auth_dir"
   fi
 }
 
@@ -219,13 +301,13 @@ prepare_host() {
   fi
 
   create_directories "$role" "$client_id"
-  prepare_development_auth "$role" "$client_id"
+  prepare_development_auth
   validate_auth_environment "$role" "$client_id"
 
   echo
   if [ "$role" = "server" ]; then
     echo "Server host preparation completed."
-    echo "Only server data/checkpoint and SuperLink state locations were prepared."
+    echo "No client data or checkpoint directories were created."
   else
     echo "Client host preparation completed for $client_id."
   fi
@@ -236,6 +318,7 @@ generate_server_compose() {
   load_environment
   export DEPLOYMENT_ROLE=server
   create_directories server
+  prepare_development_auth
   validate_auth_environment server
 
   local output="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
@@ -246,7 +329,6 @@ generate_server_compose() {
     --profile "${DEPLOYMENT_PROFILE:-development}" \
     --role server
   echo "Generated $output"
-  echo "The custom SuperExec application image is built automatically by Docker Compose when the stack is started."
   echo "Server services: SuperLink, ServerApp, and trainer."
 }
 
@@ -260,7 +342,7 @@ generate_client_compose() {
   export CLIENT_ID="$client_id"
 
   create_directories client "$client_id"
-  prepare_development_auth client "$client_id"
+  prepare_development_auth
   validate_auth_environment client "$client_id"
 
   local output="${CLIENT_COMPOSE_FILE:-docker-compose.client-${client_id}.yml}"
@@ -272,7 +354,6 @@ generate_client_compose() {
     --role client \
     --client-id "$client_id"
   echo "Generated $output"
-  echo "The custom SuperExec application image is built automatically by Docker Compose when the stack is started."
   echo "Client services: SuperNode and ClientApp for $client_id."
 }
 
@@ -299,13 +380,12 @@ run_tests() {
     return 1
   fi
 
-  docker build -f Dockerfile.superexec -t flwr_superexec:local .
   python3 scripts/generate_compose.py \
     --config clients.yml \
     --output docker-compose.test.yml \
     --profile development \
     --role all
-  docker compose -f docker-compose.test.yml run --rm test-runner
+  docker compose -f docker-compose.test.yml run --build --rm test-runner
   rm -f docker-compose.test.yml
 }
 
@@ -319,8 +399,7 @@ start_server_training() {
   fi
 
   echo "Starting federated training on the server host..."
-  echo "Docker Compose will build the custom SuperExec application image if it is not already present."
-  if docker compose -f "$compose_file" up trainer; then
+  if docker compose -f "$compose_file" up --build trainer; then
     echo "Federated training completed successfully."
     docker compose -f "$compose_file" down
   else
