@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 import sys
 
+import yaml
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import yaml
 
 from src.deployment_config import DeploymentProfile, load_deployment_config, validate_no_insecure_flag
 
@@ -88,8 +88,6 @@ def build_compose(
         selected_clients = [client for client in clients if str(client["id"]).strip() == resolved_client_id]
         if not selected_clients:
             raise ValueError(f"Client ID '{resolved_client_id}' is not defined in clients.yml.")
-        if len(selected_clients) != 1:
-            raise ValueError(f"Client ID '{resolved_client_id}' must be unique in clients.yml.")
 
     superlink_command: list[str] = []
     supernode_prefix: list[str] = []
@@ -129,21 +127,12 @@ def build_compose(
             ]
         services["superlink"] = superlink_service
 
-    node_services: list[str] = []
-    app_services: list[str] = []
-
     if role in {"all", "client"}:
         for client in selected_clients:
             current_client_id = str(client["id"]).strip()
             node = node_name(current_client_id)
             app = app_name(current_client_id)
-            node_services.append(node)
-            app_services.append(app)
-
-            if config.is_production:
-                superlink_address = config.superlink_address
-            else:
-                superlink_address = "superlink:9092"
+            superlink_address = config.superlink_address if config.is_production else "superlink:9092"
 
             node_command = [
                 *supernode_prefix,
@@ -156,6 +145,7 @@ def build_compose(
             validate_no_insecure_flag(config.profile, node_command)
 
             services[node] = {
+                "image": SUPERNODE_IMAGE,
                 "container_name": f"flwr_{node.replace('-', '_')}",
                 "command": node_command,
                 "networks": ["flwr-network"],
@@ -168,6 +158,7 @@ def build_compose(
                 ]
 
             services[app] = {
+                "image": SUPEREXEC_IMAGE,
                 "container_name": f"flwr_{app.replace('-', '_')}",
                 "env_file": [".env"],
                 "command": [
@@ -176,18 +167,22 @@ def build_compose(
                     "--appio-api-address", f"{node}:{SUPERNODE_PORT}",
                 ],
                 "networks": ["flwr-network"],
-                "volumes": [f"{client['data_dir']}:${{DATA_DIR}}", f"{client['checkpoint_dir']}:${{CHECKPOINT_DIR}}"],
+                "volumes": [
+                    f"{client['data_dir']}:/app/data:ro",
+                    f"{client['checkpoint_dir']}:/app/checkpoints:rw",
+                ],
                 "environment": {CLIENT_ID_ENV: current_client_id},
                 "depends_on": [node],
             }
 
     if role in {"all", "server"}:
         services["superexec-serverapp"] = {
+            "image": SUPEREXEC_IMAGE,
             "container_name": "flwr_superexec_serverapp",
             "env_file": [".env"],
             "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
             "networks": ["flwr-network"],
-            "volumes": ["./checkpoints/global:${CHECKPOINT_DIR}", "./data/global:${DATA_DIR}"],
+            "volumes": ["./checkpoints/global:/app/checkpoints:rw", "./data/global:/app/data:ro"],
             "depends_on": ["superlink"],
         }
 
@@ -206,6 +201,7 @@ def build_compose(
 
     if role == "all":
         services["test-runner"] = {
+            "image": SUPEREXEC_IMAGE,
             "container_name": "flwr_test_runner",
             "entrypoint": ["pytest"],
             "command": ["tests/", "-v"],
@@ -215,27 +211,11 @@ def build_compose(
             "networks": ["flwr-network"],
         }
 
-    return {"networks": {"flwr-network": {"driver": "bridge"}}, "services": services, "volumes": {"data": {}, "checkpoints": {}}}
+    return {"networks": {"flwr-network": {"driver": "bridge"}}, "services": services}
 
 
 def render_compose(compose: dict) -> str:
-    lines = [
-        "networks:", "  flwr-network:", "    driver: bridge", "",
-        "# Shared Flower SuperNode image", "x-flwr-supernode: &flwr_supernode", f"  image: {SUPERNODE_IMAGE}", "",
-        "# Shared custom SuperExec image", "x-flwr-superexec: &flwr_superexec", f"  image: {SUPEREXEC_IMAGE}", "", "services:",
-    ]
-    for name, service in compose["services"].items():
-        lines.append(f"  {name}:")
-        if name.startswith("supernode-"):
-            lines.append("    <<: *flwr_supernode")
-        elif name.startswith("superexec-") or name == "test-runner":
-            lines.append("    <<: *flwr_superexec")
-        body = yaml.safe_dump(service, sort_keys=False, default_flow_style=False).rstrip()
-        if body:
-            lines.extend(f"    {line}" for line in body.splitlines())
-        lines.append("")
-    lines.extend(["volumes:", "  data: {}", "  checkpoints: {}", ""])
-    return "\n".join(lines)
+    return yaml.safe_dump(compose, sort_keys=False, default_flow_style=False)
 
 
 def main() -> None:
