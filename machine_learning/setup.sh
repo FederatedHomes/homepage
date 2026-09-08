@@ -28,6 +28,29 @@ read_clients() {
   fi
 }
 
+select_host_role() {
+  local configured_role="${DEPLOYMENT_ROLE:-}"
+  if [ "$configured_role" = "server" ] || [ "$configured_role" = "client" ]; then
+    echo "$configured_role"
+    return 0
+  fi
+
+  echo
+  echo "What type of host are you preparing?"
+  echo "  1) Server host — runs Flower SuperLink and ServerApp"
+  echo "  2) Client host — runs one SuperNode and one ClientApp"
+  read -rp "Enter choice [1-2]: " role_choice
+
+  case "$role_choice" in
+    1) echo "server" ;;
+    2) echo "client" ;;
+    *)
+      echo "ERROR: Invalid host role selection." >&2
+      return 1
+      ;;
+  esac
+}
+
 select_client_id() {
   local selected="${CLIENT_ID:-}"
   if [ -n "$selected" ]; then
@@ -52,8 +75,8 @@ PY
     return 1
   fi
 
-  echo
-  echo "Select the client for this machine:" >&2
+  echo >&2
+  echo "Select the client assigned to this machine:" >&2
   local index=1
   for client_id in "${client_ids[@]}"; do
     echo "  $index) $client_id" >&2
@@ -69,46 +92,48 @@ PY
 }
 
 create_directories() {
-  local role="${1:-all}"
-  mkdir -p data/global checkpoints/global
+  local role="$1"
 
-  if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ] && [ "$role" = "server" ]; then
-    mkdir -p "$SUPERLINK_STATE_HOST_DIR"
+  if [ "$role" = "server" ]; then
+    if [ "${DEPLOYMENT_PROFILE:-development}" = "production" ] && [ -n "${SUPERLINK_STATE_HOST_DIR:-}" ]; then
+      mkdir -p "$SUPERLINK_STATE_HOST_DIR"
+      echo "Prepared SuperLink state directory: $SUPERLINK_STATE_HOST_DIR"
+    fi
+    return 0
   fi
 
-  read_clients
-  python3 - "$role" "${CLIENT_ID:-}" <<'PY'
+  if [ "$role" = "client" ]; then
+    local client_id="${2:-}"
+    read_clients
+    python3 - "$client_id" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
-role = sys.argv[1]
-requested_client = sys.argv[2].strip()
+requested_client = sys.argv[1].strip()
 with Path("clients.yml").open("r", encoding="utf-8") as handle:
     clients = (yaml.safe_load(handle) or {}).get("clients", [])
 
 if len(clients) < 2:
     raise SystemExit("ERROR: clients.yml must define at least 2 clients.")
 
-if role == "client":
-    clients = [c for c in clients if str(c.get("id", "")).strip() == requested_client]
-    if not clients:
-        raise SystemExit(f"ERROR: Client ID '{requested_client}' is not defined in clients.yml.")
+selected = [c for c in clients if str(c.get("id", "")).strip() == requested_client]
+if not selected:
+    raise SystemExit(f"ERROR: Client ID '{requested_client}' is not defined in clients.yml.")
 
-for client in clients:
-    client_id = str(client.get("id", "")).strip()
-    data_dir = str(client.get("data_dir", "")).strip()
-    checkpoint_dir = str(client.get("checkpoint_dir", "")).strip()
-    if not client_id:
-        raise SystemExit("ERROR: Every client must define an 'id'.")
-    if not data_dir:
-        raise SystemExit(f"ERROR: Client '{client_id}' is missing 'data_dir'.")
-    if not checkpoint_dir:
-        raise SystemExit(f"ERROR: Client '{client_id}' is missing 'checkpoint_dir'.")
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
-    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-    print(f"Prepared {client_id}: data={data_dir}, checkpoints={checkpoint_dir}")
+client = selected[0]
+client_id = str(client.get("id", "")).strip()
+data_dir = str(client.get("data_dir", "")).strip()
+checkpoint_dir = str(client.get("checkpoint_dir", "")).strip()
+if not data_dir:
+    raise SystemExit(f"ERROR: Client '{client_id}' is missing 'data_dir'.")
+if not checkpoint_dir:
+    raise SystemExit(f"ERROR: Client '{client_id}' is missing 'checkpoint_dir'.")
+Path(data_dir).mkdir(parents=True, exist_ok=True)
+Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+print(f"Prepared {client_id}: data={data_dir}, checkpoints={checkpoint_dir}")
 PY
+  fi
 }
 
 prepare_development_auth() {
@@ -147,13 +172,15 @@ PY
 }
 
 validate_auth_environment() {
-  local role="${1:-server}"
+  local role="$1"
+  local client_id="${2:-}"
+
   if [ "${DEPLOYMENT_PROFILE:-development}" != "production" ]; then
     return
   fi
 
   echo "Validating production TLS, SuperNode authentication, and deployment state..."
-  python3 - "$role" "${CLIENT_ID:-}" <<'PY'
+  python3 - "$role" "$client_id" <<'PY'
 from pathlib import Path
 import sys
 import yaml
@@ -190,9 +217,37 @@ print(f"Validated {len(clients)} SuperNode authentication key(s).")
 PY
 }
 
+prepare_host() {
+  load_environment
+  read_clients
+
+  local role
+  role="$(select_host_role)"
+  export DEPLOYMENT_ROLE="$role"
+
+  local client_id=""
+  if [ "$role" = "client" ]; then
+    client_id="$(select_client_id)"
+    export CLIENT_ID="$client_id"
+  fi
+
+  create_directories "$role" "$client_id"
+  prepare_development_auth
+  validate_auth_environment "$role" "$client_id"
+
+  echo
+  if [ "$role" = "server" ]; then
+    echo "Server host preparation completed."
+    echo "No client data or checkpoint directories were created."
+  else
+    echo "Client host preparation completed for $client_id."
+  fi
+}
+
 generate_server_compose() {
   read_clients
   load_environment
+  export DEPLOYMENT_ROLE=server
   create_directories server
   prepare_development_auth
   validate_auth_environment server
@@ -205,19 +260,21 @@ generate_server_compose() {
     --profile "${DEPLOYMENT_PROFILE:-development}" \
     --role server
   echo "Generated $output"
-  echo "Server host services: SuperLink, ServerApp, and trainer."
+  echo "Server services: SuperLink, ServerApp, and trainer."
 }
 
 generate_client_compose() {
   read_clients
   load_environment
+  export DEPLOYMENT_ROLE=client
+
   local client_id
   client_id="$(select_client_id)"
   export CLIENT_ID="$client_id"
 
-  create_directories client
+  create_directories client "$client_id"
   prepare_development_auth
-  validate_auth_environment client
+  validate_auth_environment client "$client_id"
 
   local output="${CLIENT_COMPOSE_FILE:-docker-compose.client-${client_id}.yml}"
   echo "Generating Compose configuration for $client_id..."
@@ -228,19 +285,20 @@ generate_client_compose() {
     --role client \
     --client-id "$client_id"
   echo "Generated $output"
-  echo "Client host services: SuperNode and ClientApp for $client_id."
+  echo "Client services: SuperNode and ClientApp for $client_id."
 }
 
 run_local_development_compose() {
   read_clients
   load_environment
-  echo "Generating local all-in-one development Compose configuration..."
+  echo "Generating local all-in-one DEVELOPMENT Compose configuration..."
   python3 scripts/generate_compose.py \
     --config clients.yml \
     --output docker-compose.generated.yml \
     --profile development \
     --role all
   echo "Generated docker-compose.generated.yml"
+  echo "This file is for local development/integration testing only."
 }
 
 run_tests() {
@@ -265,6 +323,7 @@ run_tests() {
 
 start_server_training() {
   load_environment
+  export DEPLOYMENT_ROLE=server
   local compose_file="${SERVER_COMPOSE_FILE:-docker-compose.server.yml}"
   if [ ! -f "$compose_file" ]; then
     echo "Server Compose file not found; generating it now."
@@ -309,7 +368,7 @@ print_menu() {
 Federated Learning Setup
 
 Select an option:
-  1) Prepare this host (environment, directories, and required authentication material)
+  1) Prepare this host — choose SERVER or CLIENT role
   2) Generate SERVER Compose file
   3) Generate CLIENT Compose file for one configured client
   4) Start federated training on the SERVER host
@@ -323,23 +382,7 @@ EOF
 print_menu
 read -rp "Enter choice [1-8]: " choice
 case "$choice" in
-  1)
-    load_environment
-    role="${DEPLOYMENT_ROLE:-server}"
-    if [ "$role" = "client" ]; then
-      client_id="$(select_client_id)"
-      export CLIENT_ID="$client_id"
-      create_directories client
-      prepare_development_auth
-      validate_auth_environment client
-      echo "Host preparation completed for client: $client_id"
-    else
-      create_directories server
-      prepare_development_auth
-      validate_auth_environment server
-      echo "Server host preparation completed."
-    fi
-    ;;
+  1) prepare_host ;;
   2) generate_server_compose ;;
   3) generate_client_compose ;;
   4) start_server_training ;;
