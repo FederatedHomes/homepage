@@ -27,6 +27,7 @@ class DeploymentConfig:
 
     profile: DeploymentProfile
     superlink_address: str
+    superlink_control_address: str
     tls_root_certificates: Path | None = None
     superlink_certificate: Path | None = None
     superlink_private_key: Path | None = None
@@ -105,6 +106,7 @@ class DeploymentConfig:
 
 PROFILE_ENV = "DEPLOYMENT_PROFILE"
 SUPERLINK_ADDRESS_ENV = "SUPERLINK_ADDRESS"
+SUPERLINK_CONTROL_ADDRESS_ENV = "SUPERLINK_CONTROL_ADDRESS"
 TLS_ROOT_CERTIFICATES_ENV = "TLS_ROOT_CERTIFICATES"
 SUPERLINK_CERTIFICATE_ENV = "SUPERLINK_CERTIFICATE"
 SUPERLINK_PRIVATE_KEY_ENV = "SUPERLINK_PRIVATE_KEY"
@@ -117,6 +119,7 @@ DEPLOYMENT_ROLE_ENV = "DEPLOYMENT_ROLE"
 
 SERVER_REQUIRED_ENV = (
     SUPERLINK_ADDRESS_ENV,
+    SUPERLINK_CONTROL_ADDRESS_ENV,
     TLS_ROOT_CERTIFICATES_ENV,
     SUPERLINK_CERTIFICATE_ENV,
     SUPERLINK_PRIVATE_KEY_ENV,
@@ -129,6 +132,7 @@ SERVER_REQUIRED_ENV = (
 
 CLIENT_REQUIRED_ENV = (
     SUPERLINK_ADDRESS_ENV,
+    SUPERLINK_CONTROL_ADDRESS_ENV,
     TLS_ROOT_CERTIFICATES_ENV,
     TLS_CERTIFICATE_HOST_DIR_ENV,
     SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV,
@@ -169,7 +173,12 @@ def load_deployment_config(
     profile = _profile_from_value(env.get(PROFILE_ENV))
     if profile is DeploymentProfile.DEVELOPMENT:
         superlink_address = env.get(SUPERLINK_ADDRESS_ENV, "").strip() or "superlink:9092"
-        return DeploymentConfig(profile=profile, superlink_address=superlink_address)
+        superlink_control_address = env.get(SUPERLINK_CONTROL_ADDRESS_ENV, "").strip() or "superlink:9093"
+        return DeploymentConfig(
+            profile=profile,
+            superlink_address=superlink_address,
+            superlink_control_address=superlink_control_address,
+        )
 
     required_env = CLIENT_REQUIRED_ENV if resolved_role == "client" else SERVER_REQUIRED_ENV
     missing = [name for name in required_env if not env.get(name, "").strip()]
@@ -205,7 +214,12 @@ def load_deployment_config(
         if missing_files:
             raise DeploymentConfigError("Production security files/directories were not found: " + ", ".join(missing_files))
 
-    return DeploymentConfig(profile=profile, superlink_address=env[SUPERLINK_ADDRESS_ENV].strip(), **paths)
+    return DeploymentConfig(
+        profile=profile,
+        superlink_address=env[SUPERLINK_ADDRESS_ENV].strip(),
+        superlink_control_address=env[SUPERLINK_CONTROL_ADDRESS_ENV].strip(),
+        **paths,
+    )
 
 
 def validate_environment(
