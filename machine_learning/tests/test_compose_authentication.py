@@ -81,3 +81,17 @@ def test_supernodes_cannot_receive_superlink_private_key(monkeypatch, tmp_path: 
         volumes = compose["services"][f"supernode-{client_id}"]["volumes"]
         assert not any("superlink.key" in volume for volume in volumes)
         assert not any("superlink.crt" in volume for volume in volumes)
+
+
+def test_server_role_contains_only_server_infrastructure(monkeypatch, tmp_path: Path) -> None:
+    production_env(tmp_path, monkeypatch)
+    compose = build_compose(clients(), profile="production", role="server")
+    assert set(compose["services"]) == {"superlink", "superexec-serverapp"}
+    assert "trainer" not in compose["services"]
+
+
+def test_all_role_retains_trainer_for_local_development(monkeypatch) -> None:
+    monkeypatch.setenv("DEPLOYMENT_PROFILE", "development")
+    monkeypatch.setenv("SUPERLINK_ADDRESS", "superlink:9092")
+    compose = build_compose(clients(), profile="development", role="all")
+    assert "trainer" in compose["services"]
