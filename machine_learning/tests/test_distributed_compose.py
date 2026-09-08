@@ -48,7 +48,9 @@ def test_server_role_contains_only_server_side_services(monkeypatch: pytest.Monk
     compose = build_compose(CLIENTS, profile=DeploymentProfile.PRODUCTION, role="server")
     services = compose["services"]
 
-    assert set(services) == {"superlink", "superexec-serverapp", "trainer"}
+    assert set(services) == {"superlink", "superexec-serverapp"}
+    assert "trainer" not in services
+    assert "test-runner" not in services
     assert not any(name.startswith("supernode-") for name in services)
     assert not any(name.startswith("superexec-clientapp-") for name in services)
 
