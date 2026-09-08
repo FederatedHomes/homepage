@@ -31,19 +31,19 @@ read_clients() {
 select_host_role() {
   local configured_role="${DEPLOYMENT_ROLE:-}"
   if [ "$configured_role" = "server" ] || [ "$configured_role" = "client" ]; then
-    echo "$configured_role"
+    printf '%s\n' "$configured_role"
     return 0
   fi
 
-  echo
-  echo "What type of host are you preparing?"
-  echo "  1) Server host — runs Flower SuperLink and ServerApp"
-  echo "  2) Client host — runs one SuperNode and one ClientApp"
+  echo >&2
+  echo "What type of host are you preparing?" >&2
+  echo "  1) Server host — runs Flower SuperLink and ServerApp" >&2
+  echo "  2) Client host — runs one SuperNode and one ClientApp" >&2
   read -rp "Enter choice [1-2]: " role_choice
 
   case "$role_choice" in
-    1) echo "server" ;;
-    2) echo "client" ;;
+    1) printf '%s\n' "server" ;;
+    2) printf '%s\n' "client" ;;
     *)
       echo "ERROR: Invalid host role selection." >&2
       return 1
@@ -54,7 +54,7 @@ select_host_role() {
 select_client_id() {
   local selected="${CLIENT_ID:-}"
   if [ -n "$selected" ]; then
-    echo "$selected"
+    printf '%s\n' "$selected"
     return 0
   fi
 
@@ -88,7 +88,7 @@ PY
     echo "ERROR: Invalid client selection." >&2
     return 1
   fi
-  echo "${client_ids[$((selection - 1))]}"
+  printf '%s\n' "${client_ids[$((selection - 1))]}"
 }
 
 create_directories() {
