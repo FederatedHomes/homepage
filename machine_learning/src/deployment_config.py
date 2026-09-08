@@ -114,7 +114,7 @@ SUPERNODE_AUTH_HOST_DIR_ENV = "SUPERNODE_AUTH_HOST_DIR"
 SUPERLINK_STATE_HOST_DIR_ENV = "SUPERLINK_STATE_HOST_DIR"
 SUPERLINK_STATE_DIR_ENV = "SUPERLINK_STATE_DIR"
 
-PRODUCTION_REQUIRED_ENV = (
+SERVER_REQUIRED_ENV = (
     SUPERLINK_ADDRESS_ENV,
     TLS_ROOT_CERTIFICATES_ENV,
     SUPERLINK_CERTIFICATE_ENV,
@@ -124,6 +124,14 @@ PRODUCTION_REQUIRED_ENV = (
     SUPERNODE_AUTH_HOST_DIR_ENV,
     SUPERLINK_STATE_HOST_DIR_ENV,
     SUPERLINK_STATE_DIR_ENV,
+)
+
+CLIENT_REQUIRED_ENV = (
+    SUPERLINK_ADDRESS_ENV,
+    TLS_ROOT_CERTIFICATES_ENV,
+    TLS_CERTIFICATE_HOST_DIR_ENV,
+    SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV,
+    SUPERNODE_AUTH_HOST_DIR_ENV,
 )
 
 _SAFE_CLIENT_ID = re.compile(r"[A-Za-z0-9._-]+")
@@ -146,44 +154,61 @@ def validate_no_insecure_flag(profile: DeploymentProfile | str, command: Sequenc
         )
 
 
-def load_deployment_config(environ: Mapping[str, str] | None = None, *, require_files: bool = False) -> DeploymentConfig:
+def load_deployment_config(
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_files: bool = False,
+    role: str = "server",
+) -> DeploymentConfig:
     env = os.environ if environ is None else environ
     profile = _profile_from_value(env.get(PROFILE_ENV))
+    if role not in {"server", "client", "all"}:
+        raise DeploymentConfigError("Deployment role must be one of: server, client, all.")
     if profile is DeploymentProfile.DEVELOPMENT:
         superlink_address = env.get(SUPERLINK_ADDRESS_ENV, "").strip() or "superlink:9092"
         return DeploymentConfig(profile=profile, superlink_address=superlink_address)
 
-    missing = [name for name in PRODUCTION_REQUIRED_ENV if not env.get(name, "").strip()]
+    required_env = CLIENT_REQUIRED_ENV if role == "client" else SERVER_REQUIRED_ENV
+    missing = [name for name in required_env if not env.get(name, "").strip()]
     if missing:
         raise DeploymentConfigError("Production deployment is missing required environment variables: " + ", ".join(missing))
 
     paths = {
         "tls_root_certificates": Path(env[TLS_ROOT_CERTIFICATES_ENV]),
-        "superlink_certificate": Path(env[SUPERLINK_CERTIFICATE_ENV]),
-        "superlink_private_key": Path(env[SUPERLINK_PRIVATE_KEY_ENV]),
+        "superlink_certificate": Path(env[SUPERLINK_CERTIFICATE_ENV]) if env.get(SUPERLINK_CERTIFICATE_ENV) else None,
+        "superlink_private_key": Path(env[SUPERLINK_PRIVATE_KEY_ENV]) if env.get(SUPERLINK_PRIVATE_KEY_ENV) else None,
         "tls_certificate_host_dir": Path(env[TLS_CERTIFICATE_HOST_DIR_ENV]),
         "supernode_auth_private_key_dir": Path(env[SUPERNODE_AUTH_PRIVATE_KEY_DIR_ENV]),
         "supernode_auth_host_dir": Path(env[SUPERNODE_AUTH_HOST_DIR_ENV]),
-        "superlink_state_host_dir": Path(env[SUPERLINK_STATE_HOST_DIR_ENV]),
-        "superlink_state_dir": Path(env[SUPERLINK_STATE_DIR_ENV]),
+        "superlink_state_host_dir": Path(env[SUPERLINK_STATE_HOST_DIR_ENV]) if env.get(SUPERLINK_STATE_HOST_DIR_ENV) else None,
+        "superlink_state_dir": Path(env[SUPERLINK_STATE_DIR_ENV]) if env.get(SUPERLINK_STATE_DIR_ENV) else None,
     }
     if require_files:
         missing_files = []
         host_tls_dir = paths["tls_certificate_host_dir"]
         for name in ("ca.crt", "superlink.crt", "superlink.key"):
+            if role == "client" and name != "ca.crt":
+                continue
             if not (host_tls_dir / name).is_file():
                 missing_files.append(f"tls_certificate_host_dir/{name}={host_tls_dir / name}")
         auth_host_dir = paths["supernode_auth_host_dir"]
         if not auth_host_dir.is_dir():
             missing_files.append(f"supernode_auth_host_dir={auth_host_dir}")
-        state_host_dir = paths["superlink_state_host_dir"]
-        if not state_host_dir.is_dir():
-            missing_files.append(f"superlink_state_host_dir={state_host_dir}")
+        if role != "client":
+            state_host_dir = paths["superlink_state_host_dir"]
+            assert state_host_dir is not None
+            if not state_host_dir.is_dir():
+                missing_files.append(f"superlink_state_host_dir={state_host_dir}")
         if missing_files:
             raise DeploymentConfigError("Production security files/directories were not found: " + ", ".join(missing_files))
 
     return DeploymentConfig(profile=profile, superlink_address=env[SUPERLINK_ADDRESS_ENV].strip(), **paths)
 
 
-def validate_environment(environ: Mapping[str, str] | None = None, *, require_files: bool = False) -> DeploymentConfig:
-    return load_deployment_config(environ, require_files=require_files)
+def validate_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_files: bool = False,
+    role: str = "server",
+) -> DeploymentConfig:
+    return load_deployment_config(environ, require_files=require_files, role=role)
