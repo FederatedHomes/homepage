@@ -98,29 +98,44 @@ select_host_role() {
   esac
 }
 
-select_client_id() {
-  local selected="${CLIENT_ID:-}"
-  if [ -n "$selected" ]; then printf '%s\n' "$selected"; return 0; fi
-  mapfile -t client_ids < <(python3 - <<'PY'
+read_client_ids() {
+  local line
+  CLIENT_IDS=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && CLIENT_IDS+=("$line")
+  done <<EOF
+$(python3 - <<'PY'
 from pathlib import Path
 import yaml
 with Path("clients.yml").open(encoding="utf-8") as handle:
     clients = (yaml.safe_load(handle) or {}).get("clients", [])
 for client in clients:
     value = str(client.get("id", "")).strip()
-    if value: print(value)
+    if value:
+        print(value)
 PY
 )
-  if ((${#client_ids[@]} == 0)); then echo "ERROR: No clients are configured in clients.yml." >&2; return 1; fi
+EOF
+}
+
+select_client_id() {
+  local selected="${CLIENT_ID:-}"
+  if [ -n "$selected" ]; then printf '%s\n' "$selected"; return 0; fi
+  read_client_ids
+  if ((${#CLIENT_IDS[@]} == 0)); then echo "ERROR: No clients are configured in clients.yml." >&2; return 1; fi
   printf '\n' >&2
   printf '%s\n' "Select the client assigned to this machine:" >&2
-  local index=1
-  for client_id in "${client_ids[@]}"; do printf '  %s) %s\n' "$index" "$client_id" >&2; index=$((index + 1)); done
+  local index=1 client_id
+  for client_id in "${CLIENT_IDS[@]}"; do
+    printf '  %s) %s\n' "$index" "$client_id" >&2
+    index=$((index + 1))
+  done
   read -rp "Enter client number: " selection
-  if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#client_ids[@]}" ]; then
-    echo "ERROR: Invalid client selection." >&2; return 1
+  if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#CLIENT_IDS[@]}" ]; then
+    echo "ERROR: Invalid client selection." >&2
+    return 1
   fi
-  printf '%s\n' "${client_ids[$((selection - 1))]}"
+  printf '%s\n' "${CLIENT_IDS[$((selection - 1))]}"
 }
 
 create_starter_tls_material() {
@@ -204,16 +219,10 @@ prepare_development_auth() {
   [ "${DEPLOYMENT_PROFILE:-development}" = development ] || return 0
   [ -f clients.yml ] && [ -f scripts/generate_supernode_auth.py ] || return 0
   local auth_dir="${DEV_SUPERNODE_AUTH_DIR:-certificates/dev/auth}"
-  mapfile -t client_ids < <(python3 - <<'PY'
-from pathlib import Path
-import yaml
-with Path("clients.yml").open(encoding="utf-8") as handle:
-    for client in (yaml.safe_load(handle) or {}).get("clients", []): print(str(client.get("id", "")).strip())
-PY
-)
+  read_client_ids
   local missing=0 client_id
-  for client_id in "${client_ids[@]}"; do [ -f "$auth_dir/$client_id" ] && [ -f "$auth_dir/$client_id.pub" ] || missing=1; done
-  if [ "$missing" -eq 1 ]; then python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "${client_ids[@]}"; fi
+  for client_id in "${CLIENT_IDS[@]}"; do [ -f "$auth_dir/$client_id" ] && [ -f "$auth_dir/$client_id.pub" ] || missing=1; done
+  if [ "$missing" -eq 1 ]; then python3 scripts/generate_supernode_auth.py --output-dir "$auth_dir" "${CLIENT_IDS[@]}"; fi
 }
 
 register_client_supernode() {
