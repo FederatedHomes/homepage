@@ -73,12 +73,12 @@ def build_compose(
 
     profile_value = profile.value if isinstance(profile, DeploymentProfile) else profile
     if profile_value == DeploymentProfile.PRODUCTION.value:
-        config = load_deployment_config()
+        config = load_deployment_config(role=role)
     else:
         config = load_deployment_config({
             "DEPLOYMENT_PROFILE": DeploymentProfile.DEVELOPMENT.value,
             "SUPERLINK_ADDRESS": os.environ.get("SUPERLINK_ADDRESS", "superlink:9092"),
-        })
+        }, role=role)
 
     selected_clients = clients
     if role == "client":
@@ -132,7 +132,7 @@ def build_compose(
             current_client_id = str(client["id"]).strip()
             node = node_name(current_client_id)
             app = app_name(current_client_id)
-            superlink_address = config.superlink_address if config.is_production else "superlink:9092"
+            superlink_address = config.superlink_address
 
             node_command = [
                 *supernode_prefix,
