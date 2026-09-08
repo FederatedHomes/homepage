@@ -1,0 +1,24 @@
+services:
+  client_registration:
+    build:
+      context: .
+      dockerfile: Dockerfile.client-registration
+    container_name: flwr_client_registration
+    env_file:
+      - .env
+    environment:
+      SUPERLINK_CONTROL_ADDRESS: ${SUPERLINK_CONTROL_ADDRESS}
+      TLS_CERTIFICATE_HOST_DIR: /app/tls
+      SUPERNODE_AUTH_HOST_DIR: /app/auth
+      REGISTRATION_PROFILE: production-registration
+      REGISTRATION_MAX_ATTEMPTS: ${REGISTRATION_MAX_ATTEMPTS:-10}
+      REGISTRATION_RETRY_SECONDS: ${REGISTRATION_RETRY_SECONDS:-10}
+    volumes:
+      - ./clients.yml:/app/clients.yml:ro
+      - ./certificates/prod/tls/ca.crt:/app/tls/ca.crt:ro
+      - ./certificates/prod/auth:/app/auth:ro
+    networks:
+      - flwr-network
+    depends_on:
+      - superlink
+    restart: "no"
