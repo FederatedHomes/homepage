@@ -136,7 +136,7 @@ def build_compose(
 
         if config.is_production:
             registration_volumes = [
-                "./.flwr:/root/.flwr:ro",
+                "./.flwr:/app/.flwr:ro",
                 "./clients.yml:/app/clients.yml:ro",
                 f"{host_tls_dir}/ca.crt:/app/certificates/prod/tls/ca.crt:ro",
             ]
