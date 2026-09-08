@@ -19,6 +19,7 @@ from src.deployment_config import DeploymentProfile, load_deployment_config, val
 SUPERNODE_PORT = 9094
 SUPERNODE_IMAGE = "flwr/supernode:1.33.0"
 SUPEREXEC_IMAGE = "flwr_superexec:local"
+SUPEREXEC_BUILD = {"context": ".", "dockerfile": "Dockerfile.superexec"}
 TLS_CONTAINER_DIR = "/etc/flower/tls"
 AUTH_CONTAINER_DIR = "/etc/flower/auth"
 DEPLOYMENT_ROLE_ENV = "DEPLOYMENT_ROLE"
@@ -159,6 +160,7 @@ def build_compose(
 
             services[app] = {
                 "image": SUPEREXEC_IMAGE,
+                "build": dict(SUPEREXEC_BUILD),
                 "container_name": f"flwr_{app.replace('-', '_')}",
                 "env_file": [".env"],
                 "command": [
@@ -178,6 +180,7 @@ def build_compose(
     if role in {"all", "server"}:
         services["superexec-serverapp"] = {
             "image": SUPEREXEC_IMAGE,
+            "build": dict(SUPEREXEC_BUILD),
             "container_name": "flwr_superexec_serverapp",
             "env_file": [".env"],
             "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
@@ -202,6 +205,7 @@ def build_compose(
     if role == "all":
         services["test-runner"] = {
             "image": SUPEREXEC_IMAGE,
+            "build": dict(SUPEREXEC_BUILD),
             "container_name": "flwr_test_runner",
             "entrypoint": ["pytest"],
             "command": ["tests/", "-v"],
