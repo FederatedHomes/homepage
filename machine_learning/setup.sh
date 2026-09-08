@@ -211,25 +211,6 @@ show_host_context() {
   echo
 }
 
-register_client_supernode() {
-  local client_id="$1"
-  [ "${DEPLOYMENT_PROFILE:-development}" = production ] || return 0
-  local ca_file="${TLS_CERTIFICATE_HOST_DIR:-./certificates/prod/tls}/ca.crt"
-  local public_key="${SUPERNODE_AUTH_HOST_DIR:-./certificates/prod/auth}/$client_id.pub"
-  local control_address="${SUPERLINK_CONTROL_ADDRESS:-}"
-  [ -n "$control_address" ] || { echo "ERROR: SUPERLINK_CONTROL_ADDRESS is required for client registration." >&2; return 1; }
-  [ -f "$ca_file" ] || { echo "ERROR: SuperLink CA certificate not found: $ca_file" >&2; return 1; }
-  [ -f "$public_key" ] || { echo "ERROR: SuperNode public key not found: $public_key" >&2; return 1; }
-  echo "Registering $client_id with the SuperLink Control API..."
-  if python3 scripts/register_supernode.py --client-id "$client_id" --public-key "$public_key" --superlink-address "$control_address" --root-certificates "$ca_file"; then
-    echo "SuperNode $client_id is registered with the federation."
-  else
-    echo "ERROR: SuperNode registration failed for $client_id." >&2
-    echo "Ensure the server SuperLink is running and TCP port 9093 is reachable from this client." >&2
-    return 1
-  fi
-}
-
 validate_auth_environment() {
   local role="$1" client_id="${2:-}"
   [ "${DEPLOYMENT_PROFILE:-development}" = production ] || return 0
@@ -276,9 +257,12 @@ prepare_host() {
   create_directories "$role" "$client_id"
   prepare_development_auth
   validate_auth_environment "$role" "$client_id"
-  if [ "$role" = client ] && [ "${DEPLOYMENT_PROFILE:-development}" = production ]; then register_client_supernode "$client_id"; fi
   echo
   echo "Host preparation complete for role=$role${client_id:+, client=$client_id}."
+  if [ "$role" = client ]; then
+    echo "Copy this client's public key to the server: ${SUPERNODE_AUTH_HOST_DIR:-./certificates/prod/auth}/$client_id.pub"
+    echo "The server-side client_registration service will register it with the federation."
+  fi
 }
 
 generate_server_compose() {
@@ -297,9 +281,12 @@ generate_client_compose() {
 }
 
 start_server_federation() {
-  generate_server_compose
-  echo "Starting server infrastructure..."
-  docker compose -f docker-compose.server.yml up --build
+  load_environment; ensure_host_dependencies server
+  [ "${DEPLOYMENT_PROFILE:-development}" = production ] || { echo "ERROR: Server infrastructure requires DEPLOYMENT_PROFILE=production." >&2; return 1; }
+  [ -f docker-compose.server.yml ] || generate_server_compose
+  [ -f docker-compose.registration.yml ] || { echo "ERROR: docker-compose.registration.yml not found." >&2; return 1; }
+  [ -f certificates/prod/tls/ca.crt ] || { echo "ERROR: certificates/prod/tls/ca.crt is required on the server." >&2; return 1; }
+  docker compose -f docker-compose.server.yml -f docker-compose.registration.yml up -d --build
 }
 
 run_tests() {
