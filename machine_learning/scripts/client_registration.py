@@ -8,10 +8,12 @@ import yaml
 ROOT = Path("/app")
 CLIENTS_FILE = ROOT / "clients.yml"
 CA_FILE = ROOT / "tls" / "ca.crt"
-CONFIG_FILE = ROOT / "registration-config.toml"
+CONFIG_FILE = Path("/root/.flwr/config.toml")
+
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
 
 def load_clients() -> list[dict]:
     with CLIENTS_FILE.open(encoding="utf-8") as handle:
@@ -21,9 +23,22 @@ def load_clients() -> list[dict]:
         raise RuntimeError("clients.yml must contain a non-empty 'clients' list.")
     return clients
 
+
+def write_flower_config(address: str, profile: str) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(
+        "[superlink]\n"
+        f'default = "{profile}"\n\n'
+        f"[superlink.{profile}]\n"
+        f'address = "{address}"\n'
+        f'root-certificates = "{CA_FILE}"\n',
+        encoding="utf-8",
+    )
+
+
 def register(client_id: str, public_key: Path, profile: str) -> bool:
     command = ["flwr", "supernode", "register", str(public_key), profile, "--format", "json"]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
     stdout, stderr = result.stdout.strip(), result.stderr.strip()
     if stdout:
         try:
@@ -40,10 +55,11 @@ def register(client_id: str, public_key: Path, profile: str) -> bool:
     print(f"SuperNode {client_id} registered successfully.", flush=True)
     return True
 
+
 def main() -> int:
     control_address = env("SUPERLINK_CONTROL_ADDRESS")
     profile = env("REGISTRATION_PROFILE", "production-registration")
-    max_attempts = int(env("REGISTRATION_MAX_ATTEMPTS", "5"))
+    max_attempts = int(env("REGISTRATION_MAX_ATTEMPTS", "10"))
     retry_seconds = int(env("REGISTRATION_RETRY_SECONDS", "10"))
     if not control_address:
         print("ERROR: SUPERLINK_CONTROL_ADDRESS is required.", file=sys.stderr)
@@ -51,13 +67,7 @@ def main() -> int:
     if not CA_FILE.is_file():
         print(f"ERROR: Federation CA certificate not found: {CA_FILE}", file=sys.stderr)
         return 1
-    CONFIG_FILE.write_text(
-        "[superlink]\n"
-        f'default = "{profile}"\n\n'
-        f"[superlink.{profile}]\n"
-        f'address = "{control_address}"\n'
-        f'root-certificates = "{CA_FILE}"\n', encoding="utf-8"
-    )
+    write_flower_config(control_address, profile)
     failures: list[str] = []
     for client in load_clients():
         client_id = str(client.get("id", "")).strip()
@@ -89,6 +99,7 @@ def main() -> int:
         return 1
     print("All configured SuperNodes registered successfully.", flush=True)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
