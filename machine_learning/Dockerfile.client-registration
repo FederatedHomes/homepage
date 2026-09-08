@@ -3,5 +3,6 @@ FROM python:3.11-slim
 RUN python -m pip install --no-cache-dir "flwr==1.33.0"
 
 WORKDIR /app
+COPY scripts/client_registration.py /app/scripts/client_registration.py
 
-ENTRYPOINT ["flwr"]
+ENTRYPOINT ["python", "/app/scripts/client_registration.py"]
