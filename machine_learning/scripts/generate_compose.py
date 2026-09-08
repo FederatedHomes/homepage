@@ -18,6 +18,8 @@ from src.deployment_config import DeploymentProfile, load_deployment_config, val
 
 SUPERNODE_PORT = 9094
 SUPERNODE_IMAGE = "flwr/supernode:1.33.0"
+REGISTRATION_IMAGE = "flwr_client_registration:local"
+REGISTRATION_BUILD = {"context": ".", "dockerfile": "Dockerfile.client-registration"}
 SUPEREXEC_IMAGE = "flwr_superexec:local"
 SUPEREXEC_BUILD = {"context": ".", "dockerfile": "Dockerfile.superexec"}
 TLS_CONTAINER_DIR = "/etc/flower/tls"
@@ -53,7 +55,6 @@ def app_name(client_id: str) -> str:
 
 
 def compose_host_path(path: Path) -> str:
-    """Render a host path for Compose, preserving relative-path semantics."""
     value = str(path)
     if not path.is_absolute() and not value.startswith("./") and not value.startswith("../"):
         return f"./{value}"
@@ -132,6 +133,23 @@ def build_compose(
             ]
         services["superlink"] = superlink_service
 
+        if config.is_production:
+            services["client-registration"] = {
+                "image": REGISTRATION_IMAGE,
+                "build": dict(REGISTRATION_BUILD),
+                "container_name": "flwr_client_registration",
+                "working_dir": "/app",
+                "entrypoint": ["flwr"],
+                "command": ["--version"],
+                "networks": ["flwr-network"],
+                "volumes": [
+                    "./.flwr:/root/.flwr:ro",
+                    f"{host_auth_dir}:/app/certificates/prod/auth:ro",
+                    f"{host_tls_dir}/ca.crt:/app/certificates/prod/tls/ca.crt:ro",
+                ],
+                "depends_on": ["superlink"],
+            }
+
     if role in {"all", "client"}:
         for client in selected_clients:
             current_client_id = str(client["id"]).strip()
@@ -193,8 +211,6 @@ def build_compose(
             "depends_on": ["superlink"],
         }
 
-    # The server deployment is infrastructure-only.  Training is started
-    # separately after the physical clients have registered and joined.
     if role == "all":
         federation_profile = "production-deployment" if config.is_production else "local-deployment"
         services["trainer"] = {
@@ -207,7 +223,6 @@ def build_compose(
             "networks": ["flwr-network"],
             "depends_on": ["superlink", "superexec-serverapp"],
         }
-        
         services["test-runner"] = {
             "image": SUPEREXEC_IMAGE,
             "build": dict(SUPEREXEC_BUILD),
