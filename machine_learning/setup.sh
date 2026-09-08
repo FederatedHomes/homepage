@@ -219,7 +219,7 @@ register_configured_clients() {
   read_client_ids
   if ((${#CLIENT_IDS[@]} < 2)); then echo "ERROR: At least 2 clients must be configured before registration." >&2; return 1; fi
 
-  echo "Registering configured SuperNodes using the lightweight Flower registration service..."
+  echo "Registering ${#CLIENT_IDS[@]} configured SuperNodes with Flower..."
   local client_id public_key
   for client_id in "${CLIENT_IDS[@]}"; do
     public_key="$auth_dir/$client_id.pub"
@@ -228,17 +228,10 @@ register_configured_clients() {
       echo "Transfer only the public key from the client host; never transfer its private key." >&2
       return 1
     fi
-    echo
-    echo "Registering $client_id..."
-    if ! docker compose -f "$compose_file" run --rm client-registration \
-      supernode register \
-      "/app/certificates/prod/auth/$client_id.pub" \
-      production-deployment \
-      --format json; then
-      echo "ERROR: SuperNode registration failed for $client_id." >&2
-      return 1
-    fi
   done
+
+  docker compose -f "$compose_file" run --rm client-registration
+
   echo
   echo "All configured SuperNodes are registered with the federation."
 }
