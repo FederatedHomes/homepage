@@ -18,6 +18,7 @@ FLOWER_CONFIG_DIR = Path(os.environ.get("FLOWER_CONFIG_DIR", "/app/.flwr"))
 FLOWER_HOME = Path(os.environ.get("FLOWER_HOME", "/tmp/flower-cli-home"))
 SUPERLINK_CONTROL_ADDRESS = os.environ.get("SUPERLINK_CONTROL_ADDRESS", "").strip()
 MIN_CLIENTS = 2
+ALREADY_REGISTERED_MESSAGE = "Public key already in use"
 
 
 class ConfigError(RuntimeError):
@@ -180,6 +181,9 @@ def register_one(home: Path, client: dict[str, str]) -> tuple[str, str]:
     if returncode == 0 and success is not False:
         return "REGISTERED", output or "registration completed"
 
+    if ALREADY_REGISTERED_MESSAGE in output:
+        return "ALREADY_REGISTERED", output
+
     return "FAILED", output or "Flower registration command failed"
 
 
@@ -212,22 +216,39 @@ def main() -> int:
         flush=True,
     )
 
-    results: list[tuple[str, str]] = []
+    results: list[tuple[str, str, str]] = []
     for client in clients:
         client_id = client["id"]
         print(f"\nRegistering {client_id}...", flush=True)
         status, detail = register_one(home, client)
-        results.append((client_id, status))
+        results.append((client_id, status, detail))
         print(f"  {client_id}: {status}", flush=True)
-        if status == "FAILED":
-            print(f"  detail: {detail}", flush=True)
 
-    print("\nRegistration status")
-    print("==================")
-    for client_id, status in results:
+    # Always query the authoritative Flower registry, even when one or more
+    # registration commands report an error. This distinguishes an actual
+    # registration failure from an idempotent "already registered" response.
+    print("\nRegistered clients reported by Flower")
+    print("======================================")
+    list_ok, listing = list_registered(home)
+    print(listing, flush=True)
+
+    print("\nRegistration status and messages")
+    print("================================")
+    for client_id, status, detail in results:
         print(f"{client_id}: {status}")
+        if detail:
+            print(f"  message: {detail}")
 
-    failures = [client_id for client_id, status in results if status == "FAILED"]
+    failures = [client_id for client_id, status, _ in results if status == "FAILED"]
+    if not list_ok:
+        print("\nERROR: Flower SuperNode listing failed.", file=sys.stderr)
+        if failures:
+            print(
+                f"ERROR: Registration failed for: {', '.join(failures)}",
+                file=sys.stderr,
+            )
+        return 1
+
     if failures:
         print(
             f"\nERROR: Registration failed for: {', '.join(failures)}",
@@ -235,15 +256,10 @@ def main() -> int:
         )
         return 1
 
-    print("\nRegistered clients reported by Flower")
-    print("======================================")
-    list_ok, listing = list_registered(home)
-    print(listing, flush=True)
-    if not list_ok:
-        print("\nERROR: Flower SuperNode listing failed.", file=sys.stderr)
-        return 1
-
-    print("\nAll configured clients are registered and Flower registry listing succeeded.")
+    print(
+        "\nAll configured clients are registered or were already registered, "
+        "and Flower registry listing succeeded."
+    )
     return 0
 
 
