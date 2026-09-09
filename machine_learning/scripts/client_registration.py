@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Register configured Flower SuperNode public keys and report their status."""
+"""Register configured Flower SuperNode public keys and verify the registry."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ import sys
 CLIENTS_FILE = Path(os.environ.get("CLIENTS_FILE", "/app/clients.yml"))
 PUBLIC_KEY_DIR = Path(os.environ.get("PUBLIC_KEY_DIR", "/app/certificates/prod/auth"))
 PROFILE = os.environ.get("FLOWER_PROFILE", "production-deployment")
+FLOWER_HOME = os.environ.get("FLOWER_HOME", "/app")
 MIN_CLIENTS = 2
 
 
@@ -26,7 +28,7 @@ def unquote(value: str) -> str:
 
 
 def parse_clients(path: Path) -> list[dict[str, str]]:
-    """Parse the small, controlled clients.yml schema used by this deployment."""
+    """Parse the intentionally small clients.yml structure used by this deployment."""
     if not path.is_file():
         raise ConfigError(f"clients.yml not found: {path}")
 
@@ -71,10 +73,6 @@ def parse_clients(path: Path) -> list[dict[str, str]]:
             raise ConfigError(f"Duplicate client ID in clients.yml: {client_id}")
         if not public_key:
             raise ConfigError(f"Client '{client_id}' must define public_key.")
-        if Path(public_key).name != f"{client_id}.pub":
-            raise ConfigError(
-                f"Client '{client_id}' public_key must end with '{client_id}.pub'."
-            )
         seen.add(client_id)
         normalized.append({"id": client_id, "public_key": public_key})
 
@@ -85,60 +83,85 @@ def parse_clients(path: Path) -> list[dict[str, str]]:
     return normalized
 
 
-def registration_key(client: dict[str, str]) -> Path:
-    """Return the public key at the path mounted into the registration container."""
-    return PUBLIC_KEY_DIR / f"{client['id']}.pub"
+def canonical_public_key(client: dict[str, str]) -> Path:
+    client_id = client["id"]
+    configured = Path(client["public_key"])
+    if configured.name != f"{client_id}.pub":
+        raise ConfigError(
+            f"Client '{client_id}' public_key must end with '{client_id}.pub'. "
+            f"Got: {configured}"
+        )
+    return PUBLIC_KEY_DIR / f"{client_id}.pub"
 
 
-def run_flwr(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run a Flower CLI command and capture its output."""
-    return subprocess.run(
+def run_flower(args: list[str]) -> tuple[int, str]:
+    env = os.environ.copy()
+    # Flower CLI resolves its config under $HOME/.flwr. Compose mounts the
+    # production config at /app/.flwr, so make /app the CLI home explicitly.
+    env["HOME"] = FLOWER_HOME
+    completed = subprocess.run(
         ["flwr", *args],
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
-
-
-def combined_output(result: subprocess.CompletedProcess[str]) -> str:
-    return "\n".join(
-        part for part in (result.stdout, result.stderr) if part
+    output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if part
     ).strip()
+    return completed.returncode, output
 
 
-def register_client(client: dict[str, str]) -> tuple[str, str]:
+def json_success(output: str) -> bool | None:
+    """Return Flower's JSON success value when output is JSON, otherwise None."""
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("success"), bool):
+        return payload["success"]
+    return None
+
+
+def register_one(client: dict[str, str]) -> tuple[str, str]:
     client_id = client["id"]
-    public_key = registration_key(client)
-
+    public_key = canonical_public_key(client)
     if not public_key.is_file():
         return "FAILED", f"public key not mounted: {public_key}"
 
-    result = run_flwr(
-        "supernode",
-        "register",
-        str(public_key),
-        PROFILE,
-        "--format",
-        "json",
+    returncode, output = run_flower(
+        [
+            "supernode",
+            "register",
+            str(public_key),
+            PROFILE,
+            "--format",
+            "json",
+        ]
     )
-    output = combined_output(result)
 
-    if result.returncode == 0:
+    success = json_success(output)
+    if returncode == 0 and success is not False:
         return "REGISTERED", output or "registration completed"
 
-    return "FAILED", output or "Flower registration command failed"
+    detail = output or "Flower registration command failed"
+    return "FAILED", detail
 
 
-def list_registered_clients() -> tuple[int, str]:
-    result = run_flwr(
-        "supernode",
-        "list",
-        PROFILE,
-        "--format",
-        "json",
-        "--verbose",
+def list_registered() -> tuple[bool, str]:
+    returncode, output = run_flower(
+        [
+            "supernode",
+            "list",
+            PROFILE,
+            "--format",
+            "json",
+            "--verbose",
+        ]
     )
-    return result.returncode, combined_output(result)
+    success = json_success(output)
+    ok = returncode == 0 and success is not False
+    return ok, output or "Flower SuperNode list command returned no output"
 
 
 def main() -> int:
@@ -157,16 +180,16 @@ def main() -> int:
     for client in clients:
         client_id = client["id"]
         print(f"\nRegistering {client_id}...", flush=True)
-        status, detail = register_client(client)
+        status, detail = register_one(client)
         results.append((client_id, status))
         print(f"  {client_id}: {status}", flush=True)
-        if detail:
-            print(detail, flush=True)
+        if status == "FAILED":
+            print(f"  detail: {detail}", flush=True)
 
-    print("\nRegistration status", flush=True)
-    print("==================", flush=True)
+    print("\nRegistration status")
+    print("==================")
     for client_id, status in results:
-        print(f"{client_id}: {status}", flush=True)
+        print(f"{client_id}: {status}")
 
     failures = [client_id for client_id, status in results if status == "FAILED"]
     if failures:
@@ -176,16 +199,15 @@ def main() -> int:
         )
         return 1
 
-    print("\nRegistered SuperNodes reported by Flower:", flush=True)
-    list_returncode, list_output = list_registered_clients()
-    if list_output:
-        print(list_output, flush=True)
-
-    if list_returncode != 0:
-        print("ERROR: Failed to list registered SuperNodes.", file=sys.stderr)
+    print("\nRegistered clients reported by Flower")
+    print("======================================")
+    list_ok, listing = list_registered()
+    print(listing, flush=True)
+    if not list_ok:
+        print("\nERROR: Flower SuperNode listing failed.", file=sys.stderr)
         return 1
 
-    print("\nAll configured SuperNodes processed successfully.", flush=True)
+    print("\nAll configured clients are registered and Flower registry listing succeeded.")
     return 0
 
 
