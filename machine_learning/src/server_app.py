@@ -1,12 +1,11 @@
 """pytorchexample: A Flower / PyTorch app."""
 
-import logging
 import os
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, Message
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
-from flwr.common import log, logger
+from flwr.common import logger
 
 import json
 
@@ -69,19 +68,21 @@ def main(grid: Grid, context: Context) -> None:
             for msg in replies:
                 if not msg.has_content():
                     failed_replies += 1
-                    log(logger, logging.WARNING, "Client reply missing content; excluding it from aggregation")
+                    logger.warning(
+                        "Client reply missing content; excluding it from aggregation"
+                    )
                     continue
 
                 metrics: MetricRecord = msg.content["metrics"]
                 if metrics.get("schema_violation", None):
-                    log(logger, logging.WARNING, "Client rejected (schema): %s", metrics["schema_violation"])
+                    logger.warning(
+                        "Client rejected (schema): %s", metrics["schema_violation"]
+                    )
                     continue
                 valid_replies.append(msg)
 
             if failed_replies:
-                log(
-                    logger,
-                    logging.WARNING,
+                logger.warning(
                     "Excluded %d failed client response(s) from round %d",
                     failed_replies,
                     server_round,
