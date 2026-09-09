@@ -16,7 +16,7 @@ data/
 checkpoints/
 
 # Generated Compose configuration
-docker-compose.generated.yml
+docker-compose.*.yml
 
 # Flower runtime state
 .flwr/*
