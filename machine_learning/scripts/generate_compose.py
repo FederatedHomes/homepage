@@ -139,13 +139,8 @@ def build_compose(
                 "./.flwr:/app/.flwr:ro",
                 "./clients.yml:/app/clients.yml:ro",
                 f"{host_tls_dir}/ca.crt:/app/certificates/prod/tls/ca.crt:ro",
+                f"{host_auth_dir}:/app/certificates/prod/auth:ro",
             ]
-            for client in clients:
-                client_id = str(client["id"]).strip()
-                configured_public_key = Path(str(client["public_key"]).strip())
-                registration_volumes.append(
-                    f"{compose_host_path(configured_public_key)}:/app/certificates/prod/auth/{client_id}.pub:ro"
-                )
             registration_environment = {
                 "SUPERLINK_CONTROL_ADDRESS": config.superlink_control_address,
             }
@@ -178,6 +173,7 @@ def build_compose(
             services[node] = {
                 "image": SUPERNODE_IMAGE,
                 "container_name": f"flwr_{node.replace('-', '_')}",
+                "init": True,
                 "command": node_command,
                 "networks": ["flwr-network"],
                 "depends_on": [] if role == "client" else ["superlink"],
@@ -185,7 +181,7 @@ def build_compose(
             if config.is_production:
                 services[node]["volumes"] = [
                     f"{host_tls_dir}/ca.crt:{TLS_CONTAINER_DIR}/ca.crt:ro",
-                    f"{host_auth_dir}/{current_client_id}:{AUTH_CONTAINER_DIR}/{current_client_id}:ro",
+                    f"{host_auth_dir}:{AUTH_CONTAINER_DIR}:ro",
                 ]
             services[app] = {
                 "image": SUPEREXEC_IMAGE,
