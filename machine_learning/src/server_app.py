@@ -1,5 +1,6 @@
 """pytorchexample: A Flower / PyTorch app."""
 
+import logging
 import os
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, Message
@@ -68,19 +69,19 @@ def main(grid: Grid, context: Context) -> None:
             for msg in replies:
                 if not msg.has_content():
                     failed_replies += 1
-                    log(logger, "WARNING", "Client reply missing content; excluding it from aggregation")
+                    log(logger, logging.WARNING, "Client reply missing content; excluding it from aggregation")
                     continue
 
                 metrics: MetricRecord = msg.content["metrics"]
                 if metrics.get("schema_violation", None):
-                    log(logger, "WARNING", "Client rejected (schema): %s", metrics["schema_violation"])
+                    log(logger, logging.WARNING, "Client rejected (schema): %s", metrics["schema_violation"])
                     continue
                 valid_replies.append(msg)
 
             if failed_replies:
                 log(
                     logger,
-                    "WARNING",
+                    logging.WARNING,
                     "Excluded %d failed client response(s) from round %d",
                     failed_replies,
                     server_round,
