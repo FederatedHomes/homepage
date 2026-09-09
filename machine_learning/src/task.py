@@ -796,7 +796,7 @@ class Utilities:
 
         fig.tight_layout()
 
-        path_filename = os.path.join(os.getenv("DATA_DIR"), f"{filename_prefix}_cwt_coeffs_signal_{signal_name}_sample_{sample}.png")
+        path_filename = os.path.join(os.getenv("CHECKPOINT_DIR"), f"{filename_prefix}_cwt_coeffs_signal_{signal_name}_sample_{sample}.png")
         plt.savefig(path_filename, dpi=300)
         print(f"Saved file to {path_filename}")
         plt.close(fig)
@@ -831,7 +831,7 @@ class Utilities:
 
             fig.tight_layout()
 
-            path_filename = os.path.join(os.getenv("DATA_DIR"), "ConfusionMatrix.png")
+            path_filename = os.path.join(os.getenv("CHECKPOINT_DIR"), "ConfusionMatrix.png")
             plt.savefig(path_filename, dpi=300)
             print(f"Saved file to {path_filename}")
             plt.close(fig)
