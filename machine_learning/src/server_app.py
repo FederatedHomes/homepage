@@ -5,7 +5,8 @@ import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, Message
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
-from flwr.common import logger
+import logging
+logger = logging.getLogger(__name__)
 
 import json
 
