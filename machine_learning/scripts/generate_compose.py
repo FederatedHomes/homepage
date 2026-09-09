@@ -134,6 +134,29 @@ def build_compose(
             ]
         services["superlink"] = superlink_service
 
+        services["superexec-serverapp"] = {
+            "image": SUPEREXEC_IMAGE,
+            "build": dict(SUPEREXEC_BUILD),
+            "container_name": "flwr_superexec_serverapp",
+            "env_file": [".env"],
+            "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
+            "networks": ["flwr-network"],
+            "volumes": ["./checkpoints/global:/app/checkpoints:rw", "./data/global:/app/data:rw"],
+            "depends_on": ["superlink"],
+        }
+
+        federation_profile = "production-deployment" if config.is_production else "local-deployment"
+        services["trainer"] = {
+            "image": "flwr/superexec:1.33.0",
+            "container_name": "flwr_trainer",
+            "entrypoint": ["flwr"],
+            "command": ["run", ".", federation_profile, "--stream"],
+            "working_dir": "/app",
+            "volumes": [".:/app"],
+            "networks": ["flwr-network"],
+            "depends_on": ["superlink", "superexec-serverapp"],
+        }
+        
         if config.is_production:
             registration_volumes = [
                 "./.flwr:/app/.flwr:ro",
@@ -153,6 +176,19 @@ def build_compose(
                 "volumes": registration_volumes,
                 "environment": registration_environment,
                 "depends_on": ["superlink"],
+            }
+
+        if role == "all":
+            services["test-runner"] = {
+                "image": SUPEREXEC_IMAGE,
+                "build": dict(SUPEREXEC_BUILD),
+                "container_name": "flwr_test_runner",
+                "entrypoint": ["pytest"],
+                "command": ["tests/", "-v"],
+                "working_dir": "/app",
+                "environment": {"PYTHONPATH": "/app"},
+                "volumes": [".:/app"],
+                "networks": ["flwr-network"],
             }
 
     if role in {"all", "client"}:
@@ -193,43 +229,6 @@ def build_compose(
                 "volumes": [f"{client['data_dir']}:/app/data:ro", f"{client['checkpoint_dir']}:/app/checkpoints:rw"],
                 "environment": {CLIENT_ID_ENV: current_client_id},
                 "depends_on": [node],
-            }
-
-    if role in {"all", "server"}:
-        services["superexec-serverapp"] = {
-            "image": SUPEREXEC_IMAGE,
-            "build": dict(SUPEREXEC_BUILD),
-            "container_name": "flwr_superexec_serverapp",
-            "env_file": [".env"],
-            "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
-            "networks": ["flwr-network"],
-            "volumes": ["./checkpoints/global:/app/checkpoints:rw", "./data/global:/app/data:rw"],
-            "depends_on": ["superlink"],
-        }
-
-    if role in {"all", "server"}:
-        federation_profile = "production-deployment" if config.is_production else "local-deployment"
-        services["trainer"] = {
-            "image": "flwr/superexec:1.33.0",
-            "container_name": "flwr_trainer",
-            "entrypoint": ["flwr"],
-            "command": ["run", ".", federation_profile, "--stream"],
-            "working_dir": "/app",
-            "volumes": [".:/app"],
-            "networks": ["flwr-network"],
-            "depends_on": ["superlink", "superexec-serverapp"],
-        }
-        if role == "all":
-            services["test-runner"] = {
-                "image": SUPEREXEC_IMAGE,
-                "build": dict(SUPEREXEC_BUILD),
-                "container_name": "flwr_test_runner",
-                "entrypoint": ["pytest"],
-                "command": ["tests/", "-v"],
-                "working_dir": "/app",
-                "environment": {"PYTHONPATH": "/app"},
-                "volumes": [".:/app"],
-                "networks": ["flwr-network"],
             }
 
     return {"networks": {"flwr-network": {"driver": "bridge"}}, "services": services}
