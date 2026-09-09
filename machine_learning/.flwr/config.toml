@@ -14,7 +14,8 @@ insecure = true
 
 # Production Docker profile. The trainer mounts the project at /app, so the
 # production CA is available at /app/certificates/prod/tls/ca.crt.
-# This profile is selected explicitly by the production Compose generator.
+# The address must match a DNS name or IP covered by superlink.crt.
+# This deployment uses 192.168.0.172 for the SuperLink Control API.
 [superlink.production-deployment]
-address = "superlink:9093"
+address = "192.168.0.172:9093"
 root-certificates = "/app/certificates/prod/tls/ca.crt"
