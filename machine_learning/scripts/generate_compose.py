@@ -207,7 +207,7 @@ def build_compose(
             "depends_on": ["superlink"],
         }
 
-    if role == "all":
+    if role in {"all", "server"}:
         federation_profile = "production-deployment" if config.is_production else "local-deployment"
         services["trainer"] = {
             "image": "flwr/superexec:1.33.0",
@@ -219,17 +219,18 @@ def build_compose(
             "networks": ["flwr-network"],
             "depends_on": ["superlink", "superexec-serverapp"],
         }
-        services["test-runner"] = {
-            "image": SUPEREXEC_IMAGE,
-            "build": dict(SUPEREXEC_BUILD),
-            "container_name": "flwr_test_runner",
-            "entrypoint": ["pytest"],
-            "command": ["tests/", "-v"],
-            "working_dir": "/app",
-            "environment": {"PYTHONPATH": "/app"},
-            "volumes": [".:/app"],
-            "networks": ["flwr-network"],
-        }
+        if role == "all":
+            services["test-runner"] = {
+                "image": SUPEREXEC_IMAGE,
+                "build": dict(SUPEREXEC_BUILD),
+                "container_name": "flwr_test_runner",
+                "entrypoint": ["pytest"],
+                "command": ["tests/", "-v"],
+                "working_dir": "/app",
+                "environment": {"PYTHONPATH": "/app"},
+                "volumes": [".:/app"],
+                "networks": ["flwr-network"],
+            }
 
     return {"networks": {"flwr-network": {"driver": "bridge"}}, "services": services}
 
