@@ -203,7 +203,7 @@ def build_compose(
             "env_file": [".env"],
             "command": ["--insecure", "--plugin-type", "serverapp", "--appio-api-address", "superlink:9091"],
             "networks": ["flwr-network"],
-            "volumes": ["./checkpoints/global:/app/checkpoints:rw", "./data/global:/app/data:ro"],
+            "volumes": ["./checkpoints/global:/app/checkpoints:rw", "./data/global:/app/data:rw"],
             "depends_on": ["superlink"],
         }
 
