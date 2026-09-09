@@ -16,6 +16,7 @@ PUBLIC_KEY_DIR = Path(os.environ.get("PUBLIC_KEY_DIR", "/app/certificates/prod/a
 PROFILE = os.environ.get("FLOWER_PROFILE", "production-deployment")
 FLOWER_CONFIG_DIR = Path(os.environ.get("FLOWER_CONFIG_DIR", "/app/.flwr"))
 FLOWER_HOME = Path(os.environ.get("FLOWER_HOME", "/tmp/flower-cli-home"))
+SUPERLINK_CONTROL_ADDRESS = os.environ.get("SUPERLINK_CONTROL_ADDRESS", "").strip()
 MIN_CLIENTS = 2
 
 
@@ -97,14 +98,37 @@ def canonical_public_key(client: dict[str, str]) -> Path:
 
 
 def prepare_flower_home() -> Path:
-    """Create a writable CLI home containing the read-only deployment config."""
+    """Create a writable CLI home with a production config using the real control address."""
     source = FLOWER_CONFIG_DIR / "config.toml"
     if not source.is_file():
         raise ConfigError(f"Flower configuration not found: {source}")
+    if PROFILE == "production-deployment" and not SUPERLINK_CONTROL_ADDRESS:
+        raise ConfigError(
+            "SUPERLINK_CONTROL_ADDRESS is required for the production registration profile."
+        )
+
+    config = source.read_text(encoding="utf-8")
+    if PROFILE == "production-deployment":
+        lines = config.splitlines()
+        in_profile = False
+        replaced = False
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("["):
+                in_profile = stripped == "[superlink.production-deployment]"
+            elif in_profile and stripped.startswith("address ="):
+                lines[index] = f'address = "{SUPERLINK_CONTROL_ADDRESS}"'
+                replaced = True
+                break
+        if not replaced:
+            raise ConfigError(
+                "Production SuperLink profile does not contain an address entry."
+            )
+        config = "\n".join(lines) + "\n"
 
     config_dir = FLOWER_HOME / ".flwr"
     config_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, config_dir / "config.toml")
+    (config_dir / "config.toml").write_text(config, encoding="utf-8")
     return FLOWER_HOME
 
 
@@ -125,7 +149,6 @@ def run_flower(home: Path, args: list[str]) -> tuple[int, str]:
 
 
 def json_success(output: str) -> bool | None:
-    """Return Flower's JSON success value when output is JSON, otherwise None."""
     try:
         payload = json.loads(output)
     except (json.JSONDecodeError, TypeError):
