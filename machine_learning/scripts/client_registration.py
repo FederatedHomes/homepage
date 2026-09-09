@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -13,7 +14,8 @@ import sys
 CLIENTS_FILE = Path(os.environ.get("CLIENTS_FILE", "/app/clients.yml"))
 PUBLIC_KEY_DIR = Path(os.environ.get("PUBLIC_KEY_DIR", "/app/certificates/prod/auth"))
 PROFILE = os.environ.get("FLOWER_PROFILE", "production-deployment")
-FLOWER_HOME = os.environ.get("FLOWER_HOME", "/app")
+FLOWER_CONFIG_DIR = Path(os.environ.get("FLOWER_CONFIG_DIR", "/app/.flwr"))
+FLOWER_HOME = Path(os.environ.get("FLOWER_HOME", "/tmp/flower-cli-home"))
 MIN_CLIENTS = 2
 
 
@@ -94,11 +96,21 @@ def canonical_public_key(client: dict[str, str]) -> Path:
     return PUBLIC_KEY_DIR / f"{client_id}.pub"
 
 
-def run_flower(args: list[str]) -> tuple[int, str]:
+def prepare_flower_home() -> Path:
+    """Create a writable CLI home containing the read-only deployment config."""
+    source = FLOWER_CONFIG_DIR / "config.toml"
+    if not source.is_file():
+        raise ConfigError(f"Flower configuration not found: {source}")
+
+    config_dir = FLOWER_HOME / ".flwr"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, config_dir / "config.toml")
+    return FLOWER_HOME
+
+
+def run_flower(home: Path, args: list[str]) -> tuple[int, str]:
     env = os.environ.copy()
-    # Flower CLI resolves its config under $HOME/.flwr. Compose mounts the
-    # production config at /app/.flwr, so make /app the CLI home explicitly.
-    env["HOME"] = FLOWER_HOME
+    env["HOME"] = str(home)
     completed = subprocess.run(
         ["flwr", *args],
         text=True,
@@ -123,13 +135,14 @@ def json_success(output: str) -> bool | None:
     return None
 
 
-def register_one(client: dict[str, str]) -> tuple[str, str]:
+def register_one(home: Path, client: dict[str, str]) -> tuple[str, str]:
     client_id = client["id"]
     public_key = canonical_public_key(client)
     if not public_key.is_file():
         return "FAILED", f"public key not mounted: {public_key}"
 
     returncode, output = run_flower(
+        home,
         [
             "supernode",
             "register",
@@ -137,19 +150,19 @@ def register_one(client: dict[str, str]) -> tuple[str, str]:
             PROFILE,
             "--format",
             "json",
-        ]
+        ],
     )
 
     success = json_success(output)
     if returncode == 0 and success is not False:
         return "REGISTERED", output or "registration completed"
 
-    detail = output or "Flower registration command failed"
-    return "FAILED", detail
+    return "FAILED", output or "Flower registration command failed"
 
 
-def list_registered() -> tuple[bool, str]:
+def list_registered(home: Path) -> tuple[bool, str]:
     returncode, output = run_flower(
+        home,
         [
             "supernode",
             "list",
@@ -157,16 +170,16 @@ def list_registered() -> tuple[bool, str]:
             "--format",
             "json",
             "--verbose",
-        ]
+        ],
     )
     success = json_success(output)
-    ok = returncode == 0 and success is not False
-    return ok, output or "Flower SuperNode list command returned no output"
+    return returncode == 0 and success is not False, output or "Flower SuperNode list command returned no output"
 
 
 def main() -> int:
     try:
         clients = parse_clients(CLIENTS_FILE)
+        home = prepare_flower_home()
     except (ConfigError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -180,7 +193,7 @@ def main() -> int:
     for client in clients:
         client_id = client["id"]
         print(f"\nRegistering {client_id}...", flush=True)
-        status, detail = register_one(client)
+        status, detail = register_one(home, client)
         results.append((client_id, status))
         print(f"  {client_id}: {status}", flush=True)
         if status == "FAILED":
@@ -201,7 +214,7 @@ def main() -> int:
 
     print("\nRegistered clients reported by Flower")
     print("======================================")
-    list_ok, listing = list_registered()
+    list_ok, listing = list_registered(home)
     print(listing, flush=True)
     if not list_ok:
         print("\nERROR: Flower SuperNode listing failed.", file=sys.stderr)
