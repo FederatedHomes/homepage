@@ -146,6 +146,9 @@ def build_compose(
                 registration_volumes.append(
                     f"{compose_host_path(configured_public_key)}:/app/certificates/prod/auth/{client_id}.pub:ro"
                 )
+            registration_environment = {
+                "SUPERLINK_CONTROL_ADDRESS": config.superlink_control_address,
+            }
             services["client-registration"] = {
                 "image": REGISTRATION_IMAGE,
                 "build": dict(REGISTRATION_BUILD),
@@ -153,6 +156,7 @@ def build_compose(
                 "working_dir": "/app",
                 "networks": ["flwr-network"],
                 "volumes": registration_volumes,
+                "environment": registration_environment,
                 "depends_on": ["superlink"],
             }
 
